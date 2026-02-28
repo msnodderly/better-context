@@ -36,3 +36,25 @@ After making changes in a specific package, run its check script:
 - **Imports**: External packages first, then local. Use `.ts` extensions for local imports.
 - **Bun APIs**: Prefer `Bun.file`, `Bun.serve`, `bun:sqlite`, `Bun.$` over Node equivalents.
 - **Testing**: Use `bun:test` with `import { test, expect } from "bun:test"`.
+
+## Cursor Cloud specific instructions
+
+### Overview
+
+Bun monorepo (Turborepo) with these core packages: `apps/server` (Hono HTTP API), `apps/cli` (TUI), `apps/web` (SvelteKit + Convex), `apps/sandbox`, `packages/shared`. See `README.md` "Development" section for full script reference.
+
+### Running the server
+
+Start the btca server on port 8080: `bun apps/server/src/index.ts`. The server requires no external database — it uses filesystem storage. It will auto-create a default config at `~/.config/btca/btca.config.jsonc` on first run. Health check: `curl http://localhost:8080/`.
+
+### Type checking
+
+`bun run check:all` will fail if `mint` (Mintlify CLI) is not installed, since `@btca/docs` uses `mint validate`. This is safe to ignore — run individual package checks instead (e.g. `bun run check:server`, `bun run check:cli`, `bun run check:web`).
+
+### Testing
+
+`bun run test:server` runs all server tests. Integration tests requiring AI API keys are gated behind `BTCA_RUN_INTEGRATION_TESTS=true` and are skipped by default. `bun run test:all` runs tests across all packages (currently only `btca-server` has tests).
+
+### Web app (`apps/web`)
+
+Requires external services (Clerk auth, Convex backend) and corresponding env vars. Type-checking works standalone via `bun run check:web`.
