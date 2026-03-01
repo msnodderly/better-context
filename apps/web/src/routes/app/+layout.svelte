@@ -19,6 +19,8 @@
 	import Sidebar from '$lib/components/Sidebar.svelte';
 	import ProvisioningModal from '$lib/components/ProvisioningModal.svelte';
 	import CreateProjectModal from '$lib/components/CreateProjectModal.svelte';
+	import AddResourceModal from '$lib/components/AddResourceModal.svelte';
+	import CommandBar from '$lib/components/CommandBar.svelte';
 
 	let { children } = $props();
 
@@ -46,6 +48,8 @@
 
 	let isInitializing = $state(true);
 	let sidebarOpen = $state(false);
+	let commandBarOpen = $state(false);
+	let addResourceModalOpen = $state(false);
 
 	const routeId = $derived((page.params as { id?: string }).id);
 	const currentThreadId = $derived(routeId && routeId !== 'new' ? routeId : null);
@@ -57,6 +61,33 @@
 	);
 	const threads = $derived(threadsQuery?.data ?? []);
 	const threadsLoading = $derived(threadsQuery?.isLoading ?? false);
+
+	const openCommandBar = () => {
+		commandBarOpen = true;
+		sidebarOpen = false;
+	};
+
+	const closeCommandBar = () => {
+		commandBarOpen = false;
+	};
+
+	const openAddResourceModal = () => {
+		addResourceModalOpen = true;
+	};
+
+	const closeAddResourceModal = () => {
+		addResourceModalOpen = false;
+	};
+
+	const handleGlobalKeydown = (event: KeyboardEvent) => {
+		if (event.defaultPrevented) return;
+		if (event.key.toLowerCase() !== 'k') return;
+		if (!event.metaKey && !event.ctrlKey) return;
+		if (event.shiftKey || event.altKey) return;
+		if (addResourceModalOpen) return;
+		event.preventDefault();
+		openCommandBar();
+	};
 
 	onMount(async () => {
 		clerkInitPromise = (async () => {
@@ -123,6 +154,7 @@
 	$effect(() => {
 		page.url.pathname;
 		sidebarOpen = false;
+		commandBarOpen = false;
 	});
 
 	$effect(() => {
@@ -133,6 +165,8 @@
 		}
 	});
 </script>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
 
 <svelte:head>
 	<title>btca | App</title>
@@ -163,6 +197,7 @@
 				isOpen={sidebarOpen}
 				isLoading={threadsLoading}
 				on:close={() => (sidebarOpen = false)}
+				on:openCommandBar={openCommandBar}
 			/>
 		</aside>
 
@@ -189,3 +224,11 @@
 
 <ProvisioningModal />
 <CreateProjectModal {projectStore} />
+<CommandBar
+	isOpen={commandBarOpen}
+	{threads}
+	{currentThreadId}
+	on:close={closeCommandBar}
+	on:quickAddResource={openAddResourceModal}
+/>
+<AddResourceModal isOpen={addResourceModalOpen} onClose={closeAddResourceModal} />

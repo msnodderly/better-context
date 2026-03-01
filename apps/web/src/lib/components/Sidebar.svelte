@@ -14,8 +14,7 @@
 		Settings,
 		Sun,
 		Trash2,
-		User,
-		X
+		User
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
 	import { createEventDispatcher, onDestroy } from 'svelte';
@@ -45,24 +44,17 @@
 
 	let { threads, currentThreadId, isOpen, isLoading = false }: Props = $props();
 
-	const dispatch = createEventDispatcher<{ close: void }>();
+	const dispatch = createEventDispatcher<{ close: void; openCommandBar: void }>();
 	const auth = getAuthState();
 	const themeStore = getThemeStore();
 	const projectStore = getProjectStore();
 	const client = useConvexClient();
 
-	let searchValue = $state('');
 	let showUserMenu = $state(false);
 	let showProjectsSection = $state(false);
 	const preloadDelayMs = 120;
 	const preloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const preloadInFlight = new Set<string>();
-
-	const filteredThreads = $derived.by(() => {
-		const query = searchValue.trim().toLowerCase();
-		if (!query) return threads;
-		return threads.filter((thread) => (thread.title ?? thread._id).toLowerCase().includes(query));
-	});
 
 	function formatDate(timestamp: number): string {
 		return new Date(timestamp).toLocaleDateString(undefined, {
@@ -75,6 +67,10 @@
 
 	function handleNavigate() {
 		if (isOpen) dispatch('close');
+	}
+
+	function openCommandBar() {
+		dispatch('openCommandBar');
 	}
 
 	function createNewThread() {
@@ -269,20 +265,18 @@
 			<Search size={14} class="bc-muted" />
 			<input
 				type="text"
-				class="bc-sidebar-search-input"
-				placeholder="Search threads"
-				bind:value={searchValue}
+				class="bc-sidebar-search-input cursor-pointer"
+				placeholder="Search threads or commands"
+				readonly
+				value=""
+				onclick={openCommandBar}
+				onfocus={openCommandBar}
 			/>
-			{#if searchValue}
-				<button
-					type="button"
-					class="bc-sidebar-clear"
-					onclick={() => (searchValue = '')}
-					aria-label="Clear search"
-				>
-					<X size={14} />
-				</button>
-			{/if}
+			<span
+				class="bc-muted border border-[hsl(var(--bc-border))] bg-[hsl(var(--bc-surface-2))] px-1.5 py-0.5 text-[10px] font-semibold"
+			>
+				⌘K
+			</span>
 		</div>
 	</div>
 
@@ -296,17 +290,13 @@
 				<Loader2 size={14} class="animate-spin" />
 				Loading threads...
 			</div>
-		{:else if filteredThreads.length === 0}
+		{:else if threads.length === 0}
 			<div class="px-3 py-2 text-xs">
-				<div class="font-semibold">
-					{searchValue ? 'No matches found' : 'No threads yet'}
-				</div>
-				<p class="bc-muted mt-1">
-					{searchValue ? 'Try a different search.' : 'Create a new thread to get started.'}
-				</p>
+				<div class="font-semibold">No threads yet</div>
+				<p class="bc-muted mt-1">Create a new thread to get started.</p>
 			</div>
 		{:else}
-			{#each filteredThreads as thread (thread._id)}
+			{#each threads as thread (thread._id)}
 				<a
 					href="/app/chat/{thread._id}"
 					class={currentThreadId === thread._id
