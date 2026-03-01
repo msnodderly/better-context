@@ -725,6 +725,22 @@
 		box-shadow: none;
 	}
 
+	.bc-command-trigger-kbd {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1px 5px;
+		min-width: 20px;
+		height: 18px;
+		border: 1px solid hsl(var(--bc-border));
+		background: hsl(var(--bc-bg));
+		color: hsl(var(--bc-fg-muted));
+		font-size: 10px;
+		font-family: var(--font-family-geist);
+		font-weight: 500;
+		flex-shrink: 0;
+	}
+
 	/* Chat-specific styles */
 	.chat-messages {
 		display: flex;

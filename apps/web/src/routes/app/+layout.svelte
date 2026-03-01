@@ -2,6 +2,7 @@
 	import { Loader2, Menu } from '@lucide/svelte';
 	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { setupConvex, useConvexClient, useQuery } from 'convex-svelte';
 	import { env } from '$env/dynamic/public';
 	import { initializeClerk, getClerk } from '$lib/clerk';
@@ -9,6 +10,7 @@
 	import { setBillingStore } from '$lib/stores/billing.svelte';
 	import { setInstanceStore } from '$lib/stores/instance.svelte';
 	import { setProjectStore } from '$lib/stores/project.svelte';
+	import { setCommandPaletteStore } from '$lib/stores/commandPalette.svelte';
 	import {
 		identifyUser,
 		resetUser,
@@ -17,8 +19,10 @@
 	} from '$lib/stores/analytics.svelte';
 	import { api } from '../../convex/_generated/api';
 	import Sidebar from '$lib/components/Sidebar.svelte';
+	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import ProvisioningModal from '$lib/components/ProvisioningModal.svelte';
 	import CreateProjectModal from '$lib/components/CreateProjectModal.svelte';
+	import AddResourceModal from '$lib/components/AddResourceModal.svelte';
 
 	let { children } = $props();
 
@@ -43,9 +47,27 @@
 	const billingStore = setBillingStore();
 	const instanceStore = setInstanceStore();
 	const projectStore = setProjectStore();
+	const commandPalette = setCommandPaletteStore();
 
 	let isInitializing = $state(true);
 	let sidebarOpen = $state(false);
+	let showAddResource = $state(false);
+
+	function handleGlobalKeydown(event: KeyboardEvent) {
+		if ((event.metaKey || event.ctrlKey) && event.key === 'k') {
+			event.preventDefault();
+			commandPalette.toggle();
+		}
+	}
+
+	function handleNewThread() {
+		goto('/app/chat/new');
+		sidebarOpen = false;
+	}
+
+	function handleNavigate() {
+		sidebarOpen = false;
+	}
 
 	const routeId = $derived((page.params as { id?: string }).id);
 	const currentThreadId = $derived(routeId && routeId !== 'new' ? routeId : null);
@@ -134,6 +156,8 @@
 	});
 </script>
 
+<svelte:window onkeydown={handleGlobalKeydown} />
+
 <svelte:head>
 	<title>btca | App</title>
 	<meta name="description" content="Web-based chat interface for btca" />
@@ -189,3 +213,13 @@
 
 <ProvisioningModal />
 <CreateProjectModal {projectStore} />
+<AddResourceModal isOpen={showAddResource} onClose={() => (showAddResource = false)} />
+
+{#if auth.isSignedIn}
+	<CommandPalette
+		{threads}
+		onNewThread={handleNewThread}
+		onAddResource={() => (showAddResource = true)}
+		onNavigate={handleNavigate}
+	/>
+{/if}

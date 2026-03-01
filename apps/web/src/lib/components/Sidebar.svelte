@@ -14,8 +14,7 @@
 		Settings,
 		Sun,
 		Trash2,
-		User,
-		X
+		User
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
 	import { createEventDispatcher, onDestroy } from 'svelte';
@@ -25,6 +24,7 @@
 	import { getAuthState, openSignIn, signOut } from '$lib/stores/auth.svelte';
 	import { getThemeStore } from '$lib/stores/theme.svelte';
 	import { getProjectStore } from '$lib/stores/project.svelte';
+	import { getCommandPaletteStore } from '$lib/stores/commandPalette.svelte';
 	import { threadPreloadStore } from '$lib/stores/threadPreload.svelte';
 	import InstanceStatus from '$lib/components/InstanceStatus.svelte';
 	import { trackEvent, ClientAnalyticsEvents } from '$lib/stores/analytics.svelte';
@@ -49,20 +49,14 @@
 	const auth = getAuthState();
 	const themeStore = getThemeStore();
 	const projectStore = getProjectStore();
+	const commandPalette = getCommandPaletteStore();
 	const client = useConvexClient();
 
-	let searchValue = $state('');
 	let showUserMenu = $state(false);
 	let showProjectsSection = $state(false);
 	const preloadDelayMs = 120;
 	const preloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const preloadInFlight = new Set<string>();
-
-	const filteredThreads = $derived.by(() => {
-		const query = searchValue.trim().toLowerCase();
-		if (!query) return threads;
-		return threads.filter((thread) => (thread.title ?? thread._id).toLowerCase().includes(query));
-	});
 
 	function formatDate(timestamp: number): string {
 		return new Date(timestamp).toLocaleDateString(undefined, {
@@ -265,25 +259,17 @@
 	</div>
 
 	<div class="bc-sidebar-section">
-		<div class="bc-sidebar-search">
+		<button
+			type="button"
+			class="bc-sidebar-search w-full cursor-pointer"
+			onclick={() => commandPalette.open()}
+		>
 			<Search size={14} class="bc-muted" />
-			<input
-				type="text"
-				class="bc-sidebar-search-input"
-				placeholder="Search threads"
-				bind:value={searchValue}
-			/>
-			{#if searchValue}
-				<button
-					type="button"
-					class="bc-sidebar-clear"
-					onclick={() => (searchValue = '')}
-					aria-label="Clear search"
-				>
-					<X size={14} />
-				</button>
-			{/if}
-		</div>
+			<span class="bc-sidebar-search-input flex-1 text-left" style="color: hsl(var(--bc-fg-muted))">
+				Search...
+			</span>
+			<kbd class="bc-command-trigger-kbd">{'\u2318'}K</kbd>
+		</button>
 	</div>
 
 	<div class="bc-sidebar-section">
@@ -296,17 +282,13 @@
 				<Loader2 size={14} class="animate-spin" />
 				Loading threads...
 			</div>
-		{:else if filteredThreads.length === 0}
+		{:else if threads.length === 0}
 			<div class="px-3 py-2 text-xs">
-				<div class="font-semibold">
-					{searchValue ? 'No matches found' : 'No threads yet'}
-				</div>
-				<p class="bc-muted mt-1">
-					{searchValue ? 'Try a different search.' : 'Create a new thread to get started.'}
-				</p>
+				<div class="font-semibold">No threads yet</div>
+				<p class="bc-muted mt-1">Create a new thread to get started.</p>
 			</div>
 		{:else}
-			{#each filteredThreads as thread (thread._id)}
+			{#each threads as thread (thread._id)}
 				<a
 					href="/app/chat/{thread._id}"
 					class={currentThreadId === thread._id
