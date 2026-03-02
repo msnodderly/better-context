@@ -41,13 +41,13 @@ export type ResourcesService = {
 		options?: {
 			quiet?: boolean;
 		}
-	) => Promise<BtcaFsResource>;
-	loadEffect: (
+	) => Effect.Effect<BtcaFsResource, ResourceError, never>;
+	loadPromise: (
 		name: string,
 		options?: {
 			quiet?: boolean;
 		}
-	) => Effect.Effect<BtcaFsResource, ResourceError, never>;
+	) => Promise<BtcaFsResource>;
 };
 
 const normalizeSearchPaths = (definition: GitResource): string[] => {
@@ -154,7 +154,7 @@ export const resolveResourceDefinition = (
 };
 
 export const createResourcesService = (config: ConfigServiceShape): ResourcesService => {
-	const load: ResourcesService['load'] = async (name, options) => {
+	const loadPromise: ResourcesService['loadPromise'] = async (name, options) => {
 		const quiet = options?.quiet ?? false;
 		const definition = resolveResourceDefinition(name, config.getResource);
 
@@ -187,23 +187,21 @@ export const createResourcesService = (config: ConfigServiceShape): ResourcesSer
 		return loadLocalResource(definitionToLocalArgs(definition));
 	};
 
-	const loadEffect: ResourcesService['loadEffect'] = (name, options) =>
-		Effect.gen(function* () {
-			return yield* Effect.tryPromise({
-				try: () => load(name, options),
-				catch: (cause) =>
-					cause instanceof ResourceError
-						? cause
-						: new ResourceError({
-								message: `Failed to resolve resource "${name}"`,
-								hint: `${CommonHints.LIST_RESOURCES} ${CommonHints.ADD_RESOURCE}`,
-								cause
-							})
-			});
+	const load: ResourcesService['load'] = (name, options) =>
+		Effect.tryPromise({
+			try: () => loadPromise(name, options),
+			catch: (cause) =>
+				cause instanceof ResourceError
+					? cause
+					: new ResourceError({
+							message: `Failed to resolve resource "${name}"`,
+							hint: `${CommonHints.LIST_RESOURCES} ${CommonHints.ADD_RESOURCE}`,
+							cause
+						})
 		});
 
 	return {
 		load,
-		loadEffect
+		loadPromise
 	};
 };

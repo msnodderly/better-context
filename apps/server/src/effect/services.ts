@@ -110,19 +110,19 @@ export const loadCollection = (args: {
 	resourceNames: readonly string[];
 	quiet?: boolean;
 }): Effect.Effect<
-	Awaited<ReturnType<CollectionsServiceShape['load']>>,
+	Awaited<ReturnType<CollectionsServiceShape['loadPromise']>>,
 	unknown,
 	CollectionsService
-> => Effect.flatMap(collectionsService, (collections) => collections.loadEffect(args));
+> => Effect.flatMap(collectionsService, (collections) => collections.load(args));
 
 export const askQuestion = (args: {
-	collection: Awaited<ReturnType<CollectionsServiceShape['load']>>;
+	collection: Awaited<ReturnType<CollectionsServiceShape['loadPromise']>>;
 	question: string;
 }): Effect.Effect<Awaited<ReturnType<AgentServiceShape['ask']>>, unknown, AgentService> =>
 	Effect.flatMap(agentService, (agent) => agent.askEffect(args));
 
 export const askQuestionStream = (args: {
-	collection: Awaited<ReturnType<CollectionsServiceShape['load']>>;
+	collection: Awaited<ReturnType<CollectionsServiceShape['loadPromise']>>;
 	question: string;
 }): Effect.Effect<Awaited<ReturnType<AgentServiceShape['askStream']>>, unknown, AgentService> =>
 	Effect.flatMap(agentService, (agent) => agent.askStreamEffect(args));
