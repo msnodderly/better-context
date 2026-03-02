@@ -33,6 +33,14 @@ const checks: Check[] = [
 		]
 	},
 	{
+		name: 'no promise-style cli client calls in tui services',
+		command: [
+			'rg',
+			'\\b(getConfig|getResources|getProviders|askQuestionStream|askQuestion|updateModel|addResource|removeResource|clearResources)\\(',
+			'apps/cli/src/tui/services.ts'
+		]
+	},
+	{
 		name: 'no direct ensureServer in cli commands',
 		command: ['rg', 'ensureServer\\(', 'apps/cli/src/commands']
 	},
