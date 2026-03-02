@@ -41,7 +41,7 @@ const resolveServerOptions = ({
 });
 
 const clear = Command.make('clear', { server: serverFlag, port: portFlag }, ({ server, port }) =>
-	effectFromPromise(() => runClearCommand(resolveServerOptions({ server, port })))
+	runClearCommand(resolveServerOptions({ server, port }))
 );
 const add = Command.make(
 	'add',
@@ -84,27 +84,25 @@ const ask = Command.make(
 		port: portFlag
 	},
 	({ question, resource, thinking, noThinking, tools, noTools, subAgent, server, port }) =>
-		effectFromPromise(() =>
-			runAskCommand({
-				question,
-				resource: [...resource],
-				thinking: Option.getOrUndefined(noThinking) ? false : Option.getOrUndefined(thinking),
-				tools: Option.getOrUndefined(noTools) ? false : Option.getOrUndefined(tools),
-				subAgent: Option.getOrUndefined(subAgent),
-				globalOpts: resolveServerOptions({ server, port })
-			})
-		)
+		runAskCommand({
+			question,
+			resource: [...resource],
+			thinking: Option.getOrUndefined(noThinking) ? false : Option.getOrUndefined(thinking),
+			tools: Option.getOrUndefined(noTools) ? false : Option.getOrUndefined(tools),
+			subAgent: Option.getOrUndefined(subAgent),
+			globalOpts: resolveServerOptions({ server, port })
+		})
 );
 
 const resources = Command.make(
 	'resources',
 	{ server: serverFlag, port: portFlag },
 	({ server, port }) =>
-		effectFromPromise(() => runResourcesCommand(resolveServerOptions({ server, port })))
+		runResourcesCommand(resolveServerOptions({ server, port }))
 );
 
 const status = Command.make('status', { server: serverFlag, port: portFlag }, ({ server, port }) =>
-	effectFromPromise(() => runStatusCommand(resolveServerOptions({ server, port })))
+	runStatusCommand(resolveServerOptions({ server, port }))
 );
 const init = Command.make(
 	'init',
@@ -161,12 +159,10 @@ const disconnect = Command.make(
 		port: portFlag
 	},
 	({ provider, server, port }) =>
-		effectFromPromise(() =>
-			runDisconnectCommand({
-				provider: Option.getOrUndefined(provider),
-				globalOpts: resolveServerOptions({ server, port })
-			})
-		)
+		runDisconnectCommand({
+			provider: Option.getOrUndefined(provider),
+			globalOpts: resolveServerOptions({ server, port })
+		})
 );
 const reference = Command.make(
 	'reference',
@@ -191,13 +187,11 @@ const remove = Command.make(
 		port: portFlag
 	},
 	({ name, global, server, port }) =>
-		effectFromPromise(() =>
-			runRemoveCommand({
-				name: Option.getOrUndefined(name),
-				global,
-				globalOpts: resolveServerOptions({ server, port })
-			})
-		)
+		runRemoveCommand({
+			name: Option.getOrUndefined(name),
+			global,
+			globalOpts: resolveServerOptions({ server, port })
+		})
 );
 const skill = Command.make('skill', {}, () => effectFromPromise(() => runSkillCommand()));
 const telemetry = pipe(
