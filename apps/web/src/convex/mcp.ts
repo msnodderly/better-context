@@ -11,6 +11,11 @@ import { instances } from './apiHelpers';
 import type { ApiKeyValidationResult } from './clerkApiKeys';
 import { getAvailableMcpResourceNames, toMcpVisibleResources } from './mcp/resourceContract.ts';
 import { withPrivateApiKey } from './privateWrappers';
+import {
+	INSTANCE_DISK_FULL_APP_MESSAGE,
+	getInstanceErrorKind,
+	getUserFacingInstanceError
+} from '../lib/instanceErrors';
 import { toWebError, type WebError } from '../lib/result/errors';
 
 const instanceActions = instances.actions;
@@ -221,7 +226,13 @@ export const ask = action({
 				...projectProperties,
 				instanceState: instance.state
 			});
-			return { ok: false as const, error: 'Instance is in an error state' };
+			return {
+				ok: false as const,
+				error:
+					instance.errorKind === 'disk_full'
+						? INSTANCE_DISK_FULL_APP_MESSAGE
+						: 'Instance is in an error state'
+			};
 		}
 
 		if (instance.state === 'provisioning' || instance.state === 'unprovisioned') {
@@ -283,6 +294,16 @@ export const ask = action({
 
 		if (!response.ok) {
 			const errorText = await response.text();
+			if (getInstanceErrorKind(errorText) === 'disk_full') {
+				await ctx.runMutation(
+					instanceMutations.setError,
+					withPrivateApiKey({
+						instanceId,
+						errorKind: 'disk_full',
+						errorMessage: getUserFacingInstanceError(errorText, errorText)
+					})
+				);
+			}
 			await trackAskFailure(errorText || `Server error: ${response.status}`, {
 				...projectProperties,
 				status: response.status,

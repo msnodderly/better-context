@@ -39,6 +39,7 @@ export default defineSchema({
 	instances: defineTable({
 		clerkId: v.string(),
 		sandboxId: v.optional(v.string()),
+		snapshotName: v.optional(v.string()),
 		state: v.union(
 			v.literal('unprovisioned'),
 			v.literal('provisioning'),
@@ -50,6 +51,7 @@ export default defineSchema({
 			v.literal('error')
 		),
 		serverUrl: v.optional(v.string()),
+		errorKind: v.optional(v.union(v.literal('disk_full'), v.literal('generic'))),
 		errorMessage: v.optional(v.string()),
 		btcaVersion: v.optional(v.string()),
 		opencodeVersion: v.optional(v.string()),

@@ -10,6 +10,11 @@ import { httpAction, type ActionCtx } from './_generated/server.js';
 import { AnalyticsEvents } from './analyticsEvents.js';
 import { instances } from './apiHelpers.js';
 import { withPrivateApiKey } from './privateWrappers.js';
+import {
+	INSTANCE_DISK_FULL_MESSAGE,
+	getInstanceErrorKind,
+	getUserFacingInstanceError
+} from '../lib/instanceErrors';
 import { WebUnhandledError, type WebError } from '../lib/result/errors';
 
 type HttpFlowResult<T> = Result<T, WebError>;
@@ -24,6 +29,7 @@ const http = httpRouter();
 const corsAllowedMethods = 'GET, POST, OPTIONS';
 const corsMaxAgeSeconds = 60 * 60 * 24;
 const defaultAllowedHeaders = 'Content-Type, Authorization, X-Requested-With';
+const localDevHosts = new Set(['localhost', '127.0.0.1']);
 
 const buildAllowedOrigins = (): Set<string> => {
 	const origins = (process.env.CLIENT_ORIGIN ?? '')
@@ -32,7 +38,7 @@ const buildAllowedOrigins = (): Set<string> => {
 		.filter(Boolean);
 
 	if (origins.length === 0) {
-		return new Set(['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175']);
+		return new Set();
 	}
 
 	return new Set(origins);
@@ -141,6 +147,7 @@ type BtcaStreamEvent =
 type InstanceRecord = {
 	_id: Id<'instances'>;
 	state: string;
+	errorKind?: 'disk_full' | 'generic';
 	serverUrl?: string | null;
 	sandboxId?: string | null;
 };
@@ -167,6 +174,16 @@ function isOriginAllowed(origin: string | null): boolean {
 	if (!origin) {
 		return false;
 	}
+
+	if (allowedOrigins.size === 0) {
+		try {
+			const parsed = new URL(origin);
+			return localDevHosts.has(parsed.hostname);
+		} catch {
+			return false;
+		}
+	}
+
 	if (allowedOrigins.size === 0) {
 		return false;
 	}
@@ -583,6 +600,16 @@ const chatStream = httpAction(async (ctx, request) => {
 				controller.close();
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+				if (getInstanceErrorKind(error) === 'disk_full') {
+					await ctx.runMutation(
+						instanceMutations.setError,
+						withPrivateApiKey({
+							instanceId: instance._id,
+							errorKind: 'disk_full',
+							errorMessage: getUserFacingInstanceError(error, errorMessage)
+						})
+					);
+				}
 				const streamDurationMs = Date.now() - streamStartedAt;
 
 				await ctx.scheduler.runAfter(0, internal.analytics.trackEvent, {
@@ -910,7 +937,14 @@ async function ensureServerUrlResult(
 	sendEvent: (payload: StreamEventPayload) => void
 ): Promise<HttpFlowResult<InstanceServerAccess>> {
 	if (instance.state === 'error') {
-		return Result.err(new WebUnhandledError({ message: 'Instance is in an error state' }));
+		return Result.err(
+			new WebUnhandledError({
+				message:
+					instance.errorKind === 'disk_full'
+						? INSTANCE_DISK_FULL_MESSAGE
+						: 'Instance is in an error state'
+			})
+		);
 	}
 
 	if (instance.state === 'provisioning' || instance.state === 'unprovisioned') {

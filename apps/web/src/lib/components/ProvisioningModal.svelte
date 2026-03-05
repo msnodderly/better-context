@@ -14,11 +14,13 @@
 	const isBootstrapping = $derived(instanceStore.isBootstrapping);
 	const hasInstance = $derived(Boolean(instanceStore.instance));
 	const instanceState = $derived(instanceStore.state ?? '');
+	const hasProvisionedAt = $derived(Boolean(instanceStore.instance?.provisionedAt));
 
 	const isVisible = $derived.by(() => {
 		if (instanceStore.isLoading) return false;
 		if (isBootstrapping) return true;
 		if (!hasInstance) return false;
+		if (hasProvisionedAt) return false;
 		return instanceState === 'unprovisioned' || instanceState === 'provisioning';
 	});
 
@@ -36,7 +38,6 @@
 
 	const hasInstanceRecord = $derived(hasInstance);
 	const hasSandbox = $derived(Boolean(instanceStore.instance?.sandboxId));
-	const hasProvisionedAt = $derived(Boolean(instanceStore.instance?.provisionedAt));
 	const hasPackages = $derived(Boolean(instanceStore.btcaVersion || instanceStore.opencodeVersion));
 	const hasServer = $derived(Boolean(instanceStore.instance?.serverUrl));
 

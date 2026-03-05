@@ -9,6 +9,8 @@ import { WebValidationError } from '../result/errors';
 type InstanceStatus = {
 	instance: Doc<'instances'>;
 	cachedResources: Doc<'cachedResources'>[];
+	expectedSnapshotName: string;
+	migrationNeeded: boolean;
 } | null;
 
 type InstanceActionResponse = {
@@ -43,8 +45,20 @@ class InstanceStore {
 		return this.status?.cachedResources ?? [];
 	}
 
+	get expectedSnapshotName() {
+		return this.status?.expectedSnapshotName ?? null;
+	}
+
+	get migrationNeeded() {
+		return this.status?.migrationNeeded ?? false;
+	}
+
 	get state() {
 		return this.status?.instance.state ?? null;
+	}
+
+	get errorKind() {
+		return this.status?.instance.errorKind ?? null;
 	}
 
 	get btcaVersion() {
@@ -100,7 +114,7 @@ class InstanceStore {
 	}
 
 	get needsBootstrap() {
-		return !this._query.isLoading && !this.instance && !this._hasBootstrapped;
+		return !this._query.isLoading && !this._hasBootstrapped;
 	}
 
 	async ensureExists(): Promise<EnsureInstanceResult | null> {

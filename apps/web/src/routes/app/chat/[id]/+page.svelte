@@ -13,6 +13,7 @@
 	import { threadPreloadStore } from '$lib/stores/threadPreload.svelte';
 	import { trackEvent, ClientAnalyticsEvents } from '$lib/stores/analytics.svelte';
 	import { SUPPORT_URL } from '$lib/billing/plans';
+	import { INSTANCE_DISK_FULL_MESSAGE } from '$lib/instanceErrors';
 	import type { BtcaChunk, CancelState } from '$lib/types';
 	import { api } from '../../../../convex/_generated/api';
 	import type { Id } from '../../../../convex/_generated/dataModel';
@@ -56,6 +57,7 @@
 	let streamStatus = $state<string | null>(null);
 	let cancelState = $state<CancelState>('none');
 	let inputValue = $state('');
+	let isResettingInstance = $state(false);
 	let chatMessagesRef = $state<{ scrollToBottom: (behavior?: ScrollBehavior) => void } | null>(
 		null
 	);
@@ -84,6 +86,9 @@
 		(billingStore.isSubscribed || billingStore.isOnFreePlan) &&
 			!billingStore.isOverLimit &&
 			hasUsableInstance
+	);
+	const showDiskFullBanner = $derived.by(
+		() => instanceStore.state === 'error' && instanceStore.errorKind === 'disk_full'
 	);
 
 	// Only show local streaming UI if it's for THIS thread
@@ -231,6 +236,19 @@
 		}
 	}
 
+	async function resetInstanceFromChat() {
+		if (isResettingInstance) return;
+		isResettingInstance = true;
+		try {
+			const result = await instanceStore.reset();
+			if (result?.error) {
+				alert(result.error);
+			}
+		} finally {
+			isResettingInstance = false;
+		}
+	}
+
 	async function retryMessage(message: import('$lib/types').Message & { role: 'user' }) {
 		if (!threadId || isStreaming) return;
 
@@ -293,6 +311,13 @@
 					if (result?.error) {
 						alert(result.error);
 					}
+				}
+				return;
+			}
+			if (instanceStore.state === 'error' && instanceStore.errorKind === 'disk_full') {
+				const resetNow = confirm(`${INSTANCE_DISK_FULL_MESSAGE} Reset it now?`);
+				if (resetNow) {
+					await resetInstanceFromChat();
 				}
 				return;
 			}
@@ -644,6 +669,9 @@
 			if (instanceStore.state === 'stopped') {
 				return 'Instance is stopped. Wake it to chat.';
 			}
+			if (instanceStore.state === 'error' && instanceStore.errorKind === 'disk_full') {
+				return 'Instance cache full. Reset it to continue.';
+			}
 			return 'Instance unavailable. Try again soon.';
 		}
 		if (isStreaming && cancelState === 'pending') return 'Press Escape again to cancel';
@@ -782,6 +810,30 @@
 								</a>
 							</p>
 						</div>
+					</div>
+				</div>
+			{/if}
+
+			{#if showDiskFullBanner}
+				<div class="mb-3 bc-card border-red-500/30 bg-red-500/10 p-3">
+					<div class="flex flex-wrap items-center justify-between gap-3">
+						<div>
+							<p class="text-sm font-medium text-red-500">Instance cache full</p>
+							<p class="mt-1 text-xs text-red-400">{INSTANCE_DISK_FULL_MESSAGE}</p>
+						</div>
+						<button
+							type="button"
+							class="bc-btn bc-btn-primary text-xs"
+							onclick={resetInstanceFromChat}
+							disabled={isResettingInstance}
+						>
+							{#if isResettingInstance}
+								<Loader2 size={12} class="animate-spin" />
+								Resetting...
+							{:else}
+								Reset instance
+							{/if}
+						</button>
 					</div>
 				</div>
 			{/if}
