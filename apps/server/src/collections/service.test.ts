@@ -123,6 +123,7 @@ describe('createCollectionsService', () => {
 					false
 				);
 				expect(await existsInVirtualFs('/repo/dist/bundle.js', collection.vfsId)).toBe(false);
+				expect(collection.agentInstructions).not.toContain('<special_notes>');
 			} finally {
 				await cleanupCollection(collection);
 			}
@@ -178,6 +179,9 @@ describe('createCollectionsService', () => {
 				);
 				expect(collection.agentInstructions).toContain('<path>./docs/guides</path>');
 				expect(collection.agentInstructions).toContain('<repo_commit>');
+				expect(collection.agentInstructions).toContain(
+					'<special_notes>Prefer the guides folder.</special_notes>'
+				);
 			} finally {
 				await cleanupCollection(collection);
 			}
@@ -238,6 +242,9 @@ describe('createCollectionsService', () => {
 				);
 				expect(collection.agentInstructions).toContain(
 					'<citation_example>https://unpkg.com/react@19.0.0/package.json</citation_example>'
+				);
+				expect(collection.agentInstructions).toContain(
+					'<special_notes>Use package docs.</special_notes>'
 				);
 			} finally {
 				await cleanupCollection(collection);

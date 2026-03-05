@@ -80,12 +80,13 @@ const createCollectionInstructionBlock = (
 	resource: BtcaFsResource,
 	metadata?: VirtualResourceMetadata
 ) => {
+	const repoUrl =
+		resource.type === 'git' && metadata?.url ? trimGitSuffix(metadata.url) : undefined;
 	const gitRef = metadata?.branch ?? metadata?.commit;
 	const githubBlobPrefix =
-		resource.type === 'git' && metadata?.url && gitRef
-			? `${trimGitSuffix(metadata.url)}/blob/${encodeURIComponent(gitRef)}`
-			: undefined;
+		repoUrl && gitRef ? `${repoUrl}/blob/${encodeURIComponent(gitRef)}` : undefined;
 	const npmCitationAlias = resource.type === 'npm' ? getNpmCitationAlias(metadata) : undefined;
+	const npmFileUrlPrefix = resource.type === 'npm' ? getNpmFileUrlPrefix(metadata) : undefined;
 
 	return [
 		'\t<resource>',
@@ -93,39 +94,33 @@ const createCollectionInstructionBlock = (
 		`\t\t<type>${getResourceTypeLabel(resource)}</type>`,
 		`\t\t<system_note>${escapeXml(FS_RESOURCE_SYSTEM_NOTE)}</system_note>`,
 		`\t\t<path>${escapeXml(`./${resource.fsName}`)}</path>`,
-		xmlLine(
-			'repo_url',
-			resource.type === 'git' ? metadata?.url && trimGitSuffix(metadata.url) : undefined
-		),
+		xmlLine('repo_url', repoUrl),
 		xmlLine('repo_branch', resource.type === 'git' ? metadata?.branch : undefined),
 		xmlLine('repo_commit', resource.type === 'git' ? metadata?.commit : undefined),
 		xmlLine('npm_package', resource.type === 'npm' ? metadata?.package : undefined),
 		xmlLine('npm_version', resource.type === 'npm' ? metadata?.version : undefined),
 		xmlLine('npm_url', resource.type === 'npm' ? metadata?.url : undefined),
 		xmlLine('npm_citation_alias', npmCitationAlias),
-		xmlLine(
-			'npm_file_url_prefix',
-			resource.type === 'npm' ? getNpmFileUrlPrefix(metadata) : undefined
-		),
+		xmlLine('npm_file_url_prefix', npmFileUrlPrefix),
 		xmlLine('github_blob_prefix', githubBlobPrefix),
 		xmlLine(
 			'citation_rule',
 			githubBlobPrefix
 				? `Convert virtual paths under ./${resource.fsName}/ to repo-relative paths, then encode each path segment for GitHub URLs.`
 				: resource.type === 'npm' && npmCitationAlias
-					? `In Sources, cite npm files using ${npmCitationAlias}/<file> and link them to ${getNpmFileUrlPrefix(metadata) ?? 'the exact file URL prefix'}/<file>. Do not cite encoded virtual folder names.`
+					? `In Sources, cite npm files using ${npmCitationAlias}/<file> and link them to ${npmFileUrlPrefix ?? 'the exact file URL prefix'}/<file>. Do not cite encoded virtual folder names.`
 					: 'Cite local file paths only for this resource.'
 		),
 		xmlLine(
 			'citation_example',
 			githubBlobPrefix
 				? `${githubBlobPrefix}/${encodePathSegments('src/routes/blog/+page.server.js')}`
-				: resource.type === 'npm' && npmCitationAlias && getNpmFileUrlPrefix(metadata)
-					? `${getNpmFileUrlPrefix(metadata)}/package.json`
+				: resource.type === 'npm' && npmCitationAlias && npmFileUrlPrefix
+					? `${npmFileUrlPrefix}/package.json`
 					: undefined
 		),
 		xmlPathBlock('focus_paths', resource.repoSubPaths, `./${resource.fsName}/`),
-		`\t\t<special_notes>${escapeXml(resource.specialAgentInstructions)}</special_notes>`,
+		xmlLine('special_notes', resource.specialAgentInstructions),
 		'\t</resource>'
 	]
 		.filter(Boolean)
