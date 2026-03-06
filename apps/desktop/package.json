@@ -1,0 +1,16 @@
+{
+	"name": "@btca/desktop",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"description": "Tauri desktop shell for the btca web app",
+	"scripts": {
+		"dev": "tauri dev",
+		"check": "cargo check --manifest-path src-tauri/Cargo.toml",
+		"format": "cargo fmt --manifest-path src-tauri/Cargo.toml --all && prettier --write package.json README.md src-tauri/tauri.conf.json src-tauri/capabilities/default.json"
+	},
+	"devDependencies": {
+		"@tauri-apps/cli": "^2.10.1",
+		"prettier": "^3.8.1"
+	}
+}
