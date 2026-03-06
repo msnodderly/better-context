@@ -15,6 +15,7 @@ import {
 	getInstanceErrorKind,
 	getUserFacingInstanceError
 } from '../lib/instanceErrors';
+import { getWebSandboxModel } from '../lib/models/webSandboxModels.ts';
 import { WebUnhandledError, type WebError } from '../lib/result/errors';
 
 type HttpFlowResult<T> = Result<T, WebError>;
@@ -83,7 +84,8 @@ type MessageLike = {
 
 type ChunkUpdate =
 	| { type: 'add'; chunk: BtcaChunk }
-	| { type: 'update'; id: string; chunk: Partial<BtcaChunk> };
+	| { type: 'update'; id: string; chunk: Partial<BtcaChunk> }
+	| { type: 'append'; id: string; chunkType: 'text' | 'reasoning'; delta: string };
 
 type BtcaToolState = {
 	status?: 'pending' | 'running' | 'completed' | 'error';
@@ -106,6 +108,9 @@ type BtcaStreamDoneEvent = {
 		outputTokens?: number;
 		reasoningTokens?: number;
 		totalTokens?: number;
+		cachedTokens?: number;
+		cacheReadTokens?: number;
+		cacheWriteTokens?: number;
 	};
 	metrics?: {
 		timing?: { totalMs?: number; genMs?: number };
@@ -163,6 +168,55 @@ type StreamEventPayload =
 	| { type: 'error'; error: string }
 	| { type: 'done' }
 	| ChunkUpdate;
+
+const toMessageStats = (doneEvent: BtcaStreamDoneEvent | null) => {
+	if (!doneEvent) return undefined;
+
+	const inputTokens = doneEvent.usage?.inputTokens;
+	const outputTokens =
+		doneEvent.usage?.outputTokens != null || doneEvent.usage?.reasoningTokens != null
+			? (doneEvent.usage?.outputTokens ?? 0) + (doneEvent.usage?.reasoningTokens ?? 0)
+			: undefined;
+	const cachedTokens =
+		doneEvent.usage?.cachedTokens ??
+		(doneEvent.usage?.cacheReadTokens != null || doneEvent.usage?.cacheWriteTokens != null
+			? (doneEvent.usage?.cacheReadTokens ?? 0) + (doneEvent.usage?.cacheWriteTokens ?? 0)
+			: undefined);
+	const durationMs = doneEvent.metrics?.timing?.totalMs ?? doneEvent.metrics?.timing?.genMs;
+	const totalTokensFromParts = [inputTokens, outputTokens, cachedTokens].reduce<number>(
+		(sum, value) => sum + (value ?? 0),
+		0
+	);
+	const totalTokens =
+		doneEvent.usage?.totalTokens ?? (totalTokensFromParts > 0 ? totalTokensFromParts : undefined);
+	const tokensPerSecond =
+		doneEvent.metrics?.throughput?.totalTokensPerSecond ??
+		doneEvent.metrics?.throughput?.outputTokensPerSecond ??
+		(durationMs && totalTokens ? totalTokens / (durationMs / 1000) : undefined);
+	const totalPriceUsd = doneEvent.metrics?.pricing?.costUsd?.total;
+
+	if (
+		durationMs == null &&
+		inputTokens == null &&
+		outputTokens == null &&
+		cachedTokens == null &&
+		totalTokens == null &&
+		tokensPerSecond == null &&
+		totalPriceUsd == null
+	) {
+		return undefined;
+	}
+
+	return {
+		durationMs,
+		inputTokens,
+		outputTokens,
+		cachedTokens,
+		totalTokens,
+		tokensPerSecond,
+		totalPriceUsd
+	};
+};
 
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
 	const headers = new Headers(init.headers);
@@ -283,6 +337,14 @@ const chatStream = httpAction(async (ctx, request) => {
 
 	const threadResources = threadWithMessages.threadResources ?? [];
 	const updatedResources = [...new Set([...threadResources, ...selectedResources])];
+	const projectId = threadWithMessages.projectId ?? undefined;
+	const project = projectId
+		? await ctx.runQuery(internal.projects.getInternal, { projectId })
+		: null;
+	const modelId =
+		project && project.instanceId === instance._id
+			? getWebSandboxModel(project.model).id
+			: getWebSandboxModel().id;
 	const threadMessages: ThreadMessage[] = (threadWithMessages.messages ?? []).map(
 		(messageItem: MessageLike) => ({
 			role: messageItem.role,
@@ -299,7 +361,8 @@ const chatStream = httpAction(async (ctx, request) => {
 	const usageCheck = await ctx.runAction(usageActions.ensureUsageAvailable, {
 		instanceId: instance._id,
 		question: questionWithHistory,
-		resources: updatedResources
+		resources: updatedResources,
+		projectId
 	});
 
 	if (!usageCheck?.ok) {
@@ -337,6 +400,9 @@ const chatStream = httpAction(async (ctx, request) => {
 
 	const usageData = usageCheck as {
 		inputTokens?: number;
+		requiredBudgetMicros?: number;
+		modelId?: string;
+		billingMode?: 'ai_budget' | 'legacy';
 		sandboxUsageHours?: number;
 	};
 
@@ -351,7 +417,8 @@ const chatStream = httpAction(async (ctx, request) => {
 			resourceCount: updatedResources.length,
 			resources: updatedResources,
 			inputTokens: usageData.inputTokens ?? 0,
-			sandboxUsageHours: usageData.sandboxUsageHours ?? 0
+			modelId: usageData.modelId ?? modelId,
+			requiredBudgetMicros: usageData.requiredBudgetMicros ?? 0
 		}
 	});
 
@@ -385,7 +452,7 @@ const chatStream = httpAction(async (ctx, request) => {
 
 				sendEvent({ type: 'session', sessionId } as StreamEventPayload);
 
-				const serverAccessResult = await ensureServerUrlResult(ctx, instance, sendEvent);
+				const serverAccessResult = await ensureServerUrlResult(ctx, instance, projectId, sendEvent);
 				if (Result.isError(serverAccessResult)) {
 					throw serverAccessResult.error;
 				}
@@ -541,26 +608,28 @@ const chatStream = httpAction(async (ctx, request) => {
 				}
 				await ctx.runMutation(api.messages.updateAssistantMessage, {
 					messageId: assistantMessageId,
-					content: assistantContent
+					content: assistantContent,
+					stats: toMessageStats(doneEvent)
 				});
 				await ctx.runMutation(
 					instanceMutations.touchActivity,
 					withPrivateApiKey({ instanceId: instance._id })
 				);
 
-				const outputTokensData = {
-					questionTokens: usageData.inputTokens ?? 0,
-					outputChars: outputCharCount,
-					reasoningChars: reasoningCharCount,
-					resources: updatedResources,
-					sandboxUsageHours: usageData.sandboxUsageHours ?? 0
-				};
+				const actualUsage = doneEvent?.usage;
 
+				let chargedBudgetMicros = 0;
 				try {
-					await ctx.runAction(usageActions.finalizeUsage, {
+					const finalizeResult = await ctx.runAction(usageActions.finalizeUsage, {
 						instanceId: instance._id,
-						...outputTokensData
+						modelId: usageData.modelId ?? modelId,
+						inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
+						outputTokens: actualUsage?.outputTokens ?? 0,
+						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
+						billingMode: usageData.billingMode,
+						sandboxUsageHours: usageData.sandboxUsageHours ?? 0
 					});
+					chargedBudgetMicros = finalizeResult.chargedBudgetMicros ?? 0;
 				} catch (error) {
 					console.error('Failed to track usage:', error);
 				}
@@ -591,8 +660,11 @@ const chatStream = httpAction(async (ctx, request) => {
 						toolCount: toolsUsed.length,
 						resourcesUsed: updatedResources,
 						resourceCount: updatedResources.length,
-						inputTokens: usageData.inputTokens ?? 0,
-						sandboxUsageHours: usageData.sandboxUsageHours ?? 0
+						modelId: usageData.modelId ?? modelId,
+						inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
+						outputTokens: actualUsage?.outputTokens ?? 0,
+						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
+						chargedBudgetMicros
 					}
 				});
 
@@ -877,7 +949,7 @@ function processStreamEvent(
 			const existing = chunksById.get(textChunkId);
 			if (existing && existing.type === 'text') {
 				existing.text += event.delta;
-				return { type: 'update', id: textChunkId, chunk: { text: existing.text } };
+				return { type: 'append', id: textChunkId, chunkType: 'text', delta: event.delta };
 			}
 
 			const chunk: BtcaChunk = { type: 'text', id: textChunkId, text: event.delta };
@@ -891,7 +963,12 @@ function processStreamEvent(
 			const existing = chunksById.get(reasoningChunkId);
 			if (existing && existing.type === 'reasoning') {
 				existing.text += event.delta;
-				return { type: 'update', id: reasoningChunkId, chunk: { text: existing.text } };
+				return {
+					type: 'append',
+					id: reasoningChunkId,
+					chunkType: 'reasoning',
+					delta: event.delta
+				};
 			}
 
 			const chunk: BtcaChunk = {
@@ -934,6 +1011,7 @@ function processStreamEvent(
 async function ensureServerUrlResult(
 	ctx: ActionCtx,
 	instance: InstanceRecord,
+	projectId: Id<'projects'> | undefined,
 	sendEvent: (payload: StreamEventPayload) => void
 ): Promise<HttpFlowResult<InstanceServerAccess>> {
 	if (instance.state === 'error') {
@@ -957,6 +1035,19 @@ async function ensureServerUrlResult(
 			return Result.ok({ serverUrl: instance.serverUrl });
 		}
 
+		if (projectId) {
+			const syncResult = await ctx.runAction(internal.instances.actions.syncResources, {
+				instanceId: instance._id,
+				projectId,
+				includePrivate: true
+			});
+			if (!syncResult.synced) {
+				return Result.err(
+					new WebUnhandledError({ message: 'Failed to sync the selected project configuration' })
+				);
+			}
+		}
+
 		const previewAccess = await ctx.runAction(internal.instances.actions.getPreviewAccess, {
 			instanceId: instance._id
 		});
@@ -978,7 +1069,7 @@ async function ensureServerUrlResult(
 	try {
 		const result = await ctx.runAction(
 			instanceActions.wake,
-			withPrivateApiKey({ instanceId: instance._id })
+			withPrivateApiKey({ instanceId: instance._id, projectId })
 		);
 		const serverUrl = result.serverUrl;
 		if (!serverUrl) {

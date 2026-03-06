@@ -1,4 +1,4 @@
-import { feature, product, featureItem, priceItem } from 'atmn';
+import { feature, product, featureItem, pricedFeatureItem, priceItem } from 'atmn';
 
 // Features
 export const sandboxHours = feature({
@@ -25,6 +25,12 @@ export const chatMessages = feature({
 	type: 'single_use'
 });
 
+export const aiBudget = feature({
+	id: 'ai_budget',
+	name: 'AI Budget',
+	type: 'single_use'
+});
+
 // Products
 export const freePlan = product({
 	id: 'free_plan',
@@ -44,6 +50,12 @@ export const btcaPro = product({
 	items: [
 		priceItem({
 			price: 8,
+			interval: 'month'
+		}),
+
+		featureItem({
+			feature_id: aiBudget.id,
+			included_usage: 5,
 			interval: 'month'
 		}),
 

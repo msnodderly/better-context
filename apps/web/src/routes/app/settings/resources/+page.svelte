@@ -70,7 +70,11 @@
 	let githubSyncError = $state<string | null>(null);
 	let githubSyncTriggered = $state(false);
 
-	const userResourceNames = $derived(new Set((userResourcesQuery?.data ?? []).map((r) => r.name)));
+	const userResourceNames = $derived(
+		new Set(
+			((userResourcesQuery?.data ?? []) as Array<{ name: string }>).map((resource) => resource.name)
+		)
+	);
 	const githubConnection = $derived(githubConnectionQuery?.data ?? null);
 	const getNpmResourceUrl = (packageName?: string, version?: string) =>
 		packageName

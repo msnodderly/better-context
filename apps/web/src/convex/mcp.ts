@@ -674,7 +674,10 @@ export const sync = action({
 			await ctx.runQuery(internal.resources.listByProject, {
 				projectId
 			})
-		).filter((resource) => resource.visibility !== 'private');
+		).filter(
+			(resource: { name: string; url?: string; branch?: string; visibility?: string }) =>
+				resource.visibility !== 'private'
+		);
 
 		const synced: string[] = [];
 		const errors: string[] = [];
@@ -683,7 +686,7 @@ export const sync = action({
 		// Process each resource in the config
 		for (const localResource of config.resources) {
 			const existingResource = existingResources.find(
-				(r) => r.name.toLowerCase() === localResource.name.toLowerCase()
+				(resource) => resource.name.toLowerCase() === localResource.name.toLowerCase()
 			);
 
 			if (existingResource && existingResource.url) {

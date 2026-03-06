@@ -18,6 +18,8 @@ type InstanceActionResponse = {
 	serverUrl?: string;
 	stopped?: boolean;
 	updated?: boolean;
+	applied?: boolean;
+	appliesOnWake?: boolean;
 	error?: string;
 };
 
@@ -32,6 +34,7 @@ class InstanceStore {
 	private _error = $state<string | null>(null);
 	private _isBootstrapping = $state(false);
 	private _hasBootstrapped = $state(false);
+	private _ensureStatus = $state<EnsureInstanceResult['status'] | null>(null);
 
 	get status(): InstanceStatus {
 		return this._query.data ?? null;
@@ -113,8 +116,20 @@ class InstanceStore {
 		return this._hasBootstrapped;
 	}
 
+	get ensureStatus() {
+		return this._ensureStatus;
+	}
+
 	get needsBootstrap() {
-		return !this._query.isLoading && !this._hasBootstrapped;
+		if (this._query.isLoading || this._hasBootstrapped) {
+			return false;
+		}
+
+		if (!this.instance) {
+			return true;
+		}
+
+		return this.migrationNeeded || this.state === 'unprovisioned' || this.state === 'provisioning';
 	}
 
 	async ensureExists(): Promise<EnsureInstanceResult | null> {
@@ -127,6 +142,7 @@ class InstanceStore {
 
 		try {
 			const result = await this._client.action(instances.actions.ensureInstanceExists, {});
+			this._ensureStatus = (result as EnsureInstanceResult).status;
 			this._hasBootstrapped = true;
 			return result as EnsureInstanceResult;
 		} catch (error) {
@@ -137,16 +153,30 @@ class InstanceStore {
 		}
 	}
 
-	async wake(): Promise<InstanceActionResponse> {
+	async wake(projectId?: Id<'projects'>): Promise<InstanceActionResponse> {
 		this._error = null;
 		trackEvent(ClientAnalyticsEvents.INSTANCE_WAKE_REQUESTED, {
-			instanceId: this.instance?._id
+			instanceId: this.instance?._id,
+			projectId
 		});
 		try {
-			const result = await this._client.action(instances.actions.wakeMyInstance, {});
+			const result = await this._client.action(instances.actions.wakeMyInstance, { projectId });
 			return result as InstanceActionResponse;
 		} catch (error) {
 			this._error = error instanceof Error ? error.message : 'Instance wake failed';
+			return { error: this._error };
+		}
+	}
+
+	async applyProjectRuntimeConfig(projectId: Id<'projects'>): Promise<InstanceActionResponse> {
+		this._error = null;
+		try {
+			const result = await this._client.action(instances.actions.applyProjectRuntimeConfig, {
+				projectId
+			});
+			return result as InstanceActionResponse;
+		} catch (error) {
+			this._error = error instanceof Error ? error.message : 'Failed to apply project config';
 			return { error: this._error };
 		}
 	}

@@ -3,6 +3,7 @@ import { Result } from 'better-result';
 
 import type { Id } from './_generated/dataModel';
 import { internalMutation } from './_generated/server';
+import { isWebSandboxModelId } from '../lib/models/webSandboxModels.ts';
 import { WebConflictError, WebValidationError, type WebError } from '../lib/result/errors';
 
 type McpInternalResult<T> = Result<T, WebError>;
@@ -169,6 +170,12 @@ export const updateProjectModelInternal = internalMutation({
 	},
 	returns: v.null(),
 	handler: async (ctx, args) => {
+		if (!isWebSandboxModelId(args.model)) {
+			throwMcpInternalError(
+				new WebValidationError({ message: 'Unsupported model', field: 'model' })
+			);
+		}
+
 		await ctx.db.patch(args.projectId, {
 			model: args.model
 		});

@@ -15,10 +15,14 @@
 	const hasInstance = $derived(Boolean(instanceStore.instance));
 	const instanceState = $derived(instanceStore.state ?? '');
 	const hasProvisionedAt = $derived(Boolean(instanceStore.instance?.provisionedAt));
+	const ensureStatus = $derived(instanceStore.ensureStatus);
+	const isEnsureProvisioning = $derived(
+		ensureStatus === 'created' || ensureStatus === 'provisioning'
+	);
 
 	const isVisible = $derived.by(() => {
 		if (instanceStore.isLoading) return false;
-		if (isBootstrapping) return true;
+		if (isBootstrapping && isEnsureProvisioning) return true;
 		if (!hasInstance) return false;
 		if (hasProvisionedAt) return false;
 		return instanceState === 'unprovisioned' || instanceState === 'provisioning';
