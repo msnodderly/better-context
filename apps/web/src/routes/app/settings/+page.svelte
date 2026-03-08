@@ -256,8 +256,7 @@ The resources available are defined by the end user in their btca dashboard. If 
 
 	const usage = $derived(billingStore.summary?.usage);
 	const selectedProject = $derived(projectStore.selectedProject);
-	const maxUsedPct = $derived(usage?.aiBudget.usedPct ?? 0);
-	const remainingPct = $derived(100 - maxUsedPct);
+	const remainingPct = $derived(usage?.aiBudget.remainingPct ?? 100);
 
 	const formattedEndDate = $derived.by(() => {
 		const end = billingStore.summary?.currentPeriodEnd;
@@ -479,13 +478,13 @@ The resources available are defined by the end user in their btca dashboard. If 
 									<HardDrive size={16} class="bc-muted" />
 									<div>
 										<p class="text-sm font-medium">Monthly AI usage</p>
-										<p class="bc-muted text-xs">{formatPercent(maxUsedPct)} used</p>
+										<p class="bc-muted text-xs">{formatPercent(remainingPct)} remaining</p>
 									</div>
 								</div>
 								<div class="h-2 w-32 overflow-hidden rounded-full bg-[hsl(var(--bc-muted)/0.2)]">
 									<div
 										class="h-full transition-all"
-										style:width={`${maxUsedPct}%`}
+										style:width={`${remainingPct}%`}
 										style:background-color={tone(remainingPct)}
 									></div>
 								</div>
@@ -771,13 +770,13 @@ The resources available are defined by the end user in their btca dashboard. If 
 									</div>
 								</div>
 								<span class="text-sm font-medium">
-									{formatPercent(maxUsedPct)} used
+									{formatPercent(remainingPct)} remaining
 								</span>
 							</div>
 							<div class="sandbox-progress-bar mt-4" style:width="100%">
 								<div
 									class="sandbox-progress-fill"
-									style:width={`${maxUsedPct}%`}
+									style:width={`${remainingPct}%`}
 									style:background-color={tone(remainingPct)}
 								></div>
 							</div>

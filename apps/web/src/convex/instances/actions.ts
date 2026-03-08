@@ -3,6 +3,7 @@
 import { createClerkClient } from '@clerk/backend';
 import { Daytona, type Sandbox } from '@daytonaio/sdk';
 import { BTCA_SNAPSHOT_NAME } from 'btca-sandbox/shared';
+import type { FunctionReference } from 'convex/server';
 import { v } from 'convex/values';
 import { Result } from 'better-result';
 
@@ -11,7 +12,12 @@ import type { Doc, Id } from '../_generated/dataModel';
 import { action, internalAction, type ActionCtx } from '../_generated/server';
 import { AnalyticsEvents } from '../analyticsEvents';
 import { instances } from '../apiHelpers';
-import { inspectGitHubConnectionForClerkUser } from '../githubAuth';
+import {
+	createInstallationToken,
+	fetchGitHubRepo,
+	getRepoFullName,
+	parseGitHubRepoRef
+} from '../githubApp';
 import { privateAction, withPrivateApiKey } from '../privateWrappers';
 import { getInstanceErrorKind, getUserFacingInstanceError } from '../../lib/instanceErrors';
 import { getWebSandboxModel } from '../../lib/models/webSandboxModels.ts';
@@ -44,7 +50,7 @@ type ResourceConfig = {
 			searchPath?: string;
 			gitProvider?: 'github' | 'generic';
 			visibility?: 'public' | 'private';
-			authSource?: 'clerk_github_oauth';
+			authSource?: 'clerk_github_oauth' | 'github_app';
 	  }
 	| {
 			type: 'npm';
@@ -64,6 +70,27 @@ type PreviewAccess = {
 
 let daytonaInstance: Daytona | null = null;
 type InstanceActionResult<T> = Result<T, WebError>;
+
+type GitHubInstallationRecord = {
+	installationId: number;
+	repositorySelection: 'all' | 'selected';
+	repositoryNames: string[];
+	status: 'active' | 'suspended' | 'deleted';
+};
+
+const githubConnectionsInternal = internal as unknown as {
+	githubConnections: {
+		getByOwner: FunctionReference<
+			'query',
+			'internal',
+			{
+				instanceId: Id<'instances'>;
+				accountLogin: string;
+			},
+			GitHubInstallationRecord[]
+		>;
+	};
+};
 
 const getClerkClient = () => {
 	const secretKey = process.env.CLERK_SECRET_KEY;
@@ -408,38 +435,160 @@ const requiresGitHubAuth = (resources: ResourceConfig[]) =>
 			resource.type === 'git' &&
 			resource.gitProvider === 'github' &&
 			resource.visibility === 'private' &&
-			resource.authSource === 'clerk_github_oauth'
+			(resource.authSource === 'clerk_github_oauth' || resource.authSource === 'github_app')
 	);
 
-async function syncGitHubAuth(sandbox: Sandbox, clerkUserId: string, resources: ResourceConfig[]) {
-	if (!requiresGitHubAuth(resources)) {
-		await sandbox.process.executeCommand('rm -f /root/.netrc');
-		return;
-	}
-
-	const connection = await inspectGitHubConnectionForClerkUser(clerkUserId);
-	if (connection.status === 'disconnected') {
+const getClerkGitHubToken = async (clerkUserId: string) => {
+	const oauthTokens = await getClerkClient().users.getUserOauthAccessToken(clerkUserId, 'github');
+	const tokenData = oauthTokens.data[0];
+	if (!tokenData?.token) {
 		throw new WebAuthError({
-			message: 'Connect GitHub in your profile before using private GitHub repositories.',
+			message: 'Reconnect any older private GitHub resources before using them in the web sandbox.',
 			code: 'UNAUTHORIZED'
 		});
 	}
 
-	if (connection.status === 'missing_scope') {
-		throw new WebAuthError({
-			message: 'Reconnect GitHub with private repository access before using private repos.',
-			code: 'FORBIDDEN'
-		});
+	return tokenData.token;
+};
+
+const escapeShellSingleQuoted = (value: string) => value.replace(/'/g, `'\\''`);
+
+const buildGitHubCredentialHelperScript = (
+	credentials: Array<{ owner: string; repo: string; token: string }>
+) => {
+	const cases = credentials
+		.map(
+			({ owner, repo, token }) => `  '${escapeShellSingleQuoted(`github.com:${owner}/${repo}`)}')
+    printf '%s\n' 'username=x-access-token'
+    printf '%s\n' 'password=${escapeShellSingleQuoted(token)}'
+    exit 0
+    ;;`
+		)
+		.join('\n');
+
+	return `#!/bin/sh
+host=""
+path=""
+while IFS='=' read -r key value; do
+	case "$key" in
+		host) host="$value" ;;
+		path) path="$value" ;;
+	esac
+done
+
+path="\${path#/}"
+path="\${path%.git}"
+
+case "$host:$path" in
+${cases}
+esac
+
+exit 0
+`;
+};
+
+async function syncGitHubAuth(
+	ctx: ActionCtx,
+	sandbox: Sandbox,
+	instanceId: Id<'instances'>,
+	clerkUserId: string,
+	resources: ResourceConfig[]
+) {
+	if (!requiresGitHubAuth(resources)) {
+		await sandbox.process.executeCommand(
+			'rm -f /root/.netrc /root/.btca-github-credential-helper.sh && git config --global --unset-all credential.helper >/dev/null 2>&1 || true && git config --global --unset credential.useHttpPath >/dev/null 2>&1 || true'
+		);
+		return;
 	}
 
-	const netrc = [
-		`machine github.com`,
-		`login x-access-token`,
-		`password ${connection.token}`,
-		''
-	].join('\n');
-	await sandbox.fs.uploadFile(Buffer.from(netrc), '/root/.netrc');
-	await sandbox.process.executeCommand('chmod 600 /root/.netrc');
+	const credentials: Array<{ owner: string; repo: string; token: string }> = [];
+	const installationTokenCache = new Map<number, string>();
+	let clerkToken: string | null = null;
+
+	for (const resource of resources) {
+		if (
+			resource.type !== 'git' ||
+			resource.gitProvider !== 'github' ||
+			resource.visibility !== 'private'
+		) {
+			continue;
+		}
+
+		const repoRef = parseGitHubRepoRef(resource.url);
+		if (!repoRef) {
+			continue;
+		}
+
+		if (resource.authSource === 'github_app') {
+			const repoFullName = getRepoFullName(repoRef);
+			const activeInstallations = (
+				(await ctx.runQuery(githubConnectionsInternal.githubConnections.getByOwner, {
+					instanceId,
+					accountLogin: repoRef.owner.toLowerCase()
+				})) as GitHubInstallationRecord[]
+			).filter((installation) => installation.status === 'active');
+
+			if (activeInstallations.length === 0) {
+				throw new WebAuthError({
+					message: `Connect GitHub and install the btca GitHub App on ${repoRef.owner} before using private repositories.`,
+					code: 'UNAUTHORIZED'
+				});
+			}
+
+			let token: string | null = null;
+			for (const installation of activeInstallations) {
+				if (
+					installation.repositorySelection === 'selected' &&
+					installation.repositoryNames.length > 0 &&
+					!installation.repositoryNames.includes(repoFullName)
+				) {
+					continue;
+				}
+
+				token =
+					installationTokenCache.get(installation.installationId) ??
+					(await createInstallationToken(installation.installationId));
+				installationTokenCache.set(installation.installationId, token);
+
+				const repoResponse = await fetchGitHubRepo(repoRef, token);
+				if (repoResponse.status === 404) {
+					continue;
+				}
+				if (!repoResponse.ok) {
+					throw new WebUnhandledError({
+						message: `GitHub repository lookup failed with status ${repoResponse.status}`
+					});
+				}
+
+				break;
+			}
+
+			if (!token) {
+				throw new WebAuthError({
+					message: `Grant the ${repoFullName} repository to the btca GitHub App before using private repositories.`,
+					code: 'FORBIDDEN'
+				});
+			}
+
+			credentials.push({ ...repoRef, token });
+			continue;
+		}
+
+		if (!clerkToken) {
+			clerkToken = await getClerkGitHubToken(clerkUserId);
+		}
+
+		credentials.push({ ...repoRef, token: clerkToken });
+	}
+
+	const helperPath = '/root/.btca-github-credential-helper.sh';
+	const helperScript = buildGitHubCredentialHelperScript(credentials);
+	await sandbox.fs.uploadFile(Buffer.from(helperScript), helperPath);
+	await sandbox.process.executeCommand(`chmod 700 ${helperPath}`);
+	await sandbox.process.executeCommand('rm -f /root/.netrc');
+	await sandbox.process.executeCommand(
+		`git config --global --unset-all credential.helper >/dev/null 2>&1 || true && git config --global credential.useHttpPath true && git config --global credential.helper '${helperPath}'`
+	);
 }
 
 async function getBtcaLogTail(sandbox: Sandbox, lines = 80) {
@@ -588,7 +737,9 @@ async function createPreparedSandbox(
 
 		step = 'upload_config';
 		unwrapInstance(
-			await withStep(step, () => syncGitHubAuth(createdSandbox, instance.clerkId, resources))
+			await withStep(step, () =>
+				syncGitHubAuth(ctx, createdSandbox, instanceId, instance.clerkId, resources)
+			)
 		);
 		step = 'upload_config';
 		unwrapInstance(await withStep(step, () => uploadBtcaConfig(createdSandbox, resources)));
@@ -887,7 +1038,11 @@ async function createSandboxFromScratch(
 	);
 
 	step = 'upload_config';
-	unwrapInstance(await withStep(step, () => syncGitHubAuth(sandbox, instance.clerkId, resources)));
+	unwrapInstance(
+		await withStep(step, () =>
+			syncGitHubAuth(ctx, sandbox, instanceId, instance.clerkId, resources)
+		)
+	);
 	step = 'upload_config';
 	unwrapInstance(await withStep(step, () => uploadBtcaConfig(sandbox, resources, model)));
 	step = 'start_btca';
@@ -976,7 +1131,9 @@ async function wakeInstanceInternal(
 			unwrapInstance(await withStep(step, () => ensureSandboxStarted(sandbox)));
 			step = 'upload_config';
 			unwrapInstance(
-				await withStep(step, () => syncGitHubAuth(sandbox, instance.clerkId, resources))
+				await withStep(step, () =>
+					syncGitHubAuth(ctx, sandbox, instanceId, instance.clerkId, resources)
+				)
 			);
 			step = 'upload_config';
 			unwrapInstance(await withStep(step, () => uploadBtcaConfig(sandbox, resources, model)));
@@ -1089,7 +1246,9 @@ async function updateInstanceInternal(
 		await updatePackages(sandbox);
 		step = 'upload_config';
 		unwrapInstance(
-			await withStep(step, () => syncGitHubAuth(sandbox, instance.clerkId, resources))
+			await withStep(step, () =>
+				syncGitHubAuth(ctx, sandbox, instanceId, instance.clerkId, resources)
+			)
 		);
 		step = 'upload_config';
 		unwrapInstance(await withStep(step, () => uploadBtcaConfig(sandbox, resources)));
@@ -1525,7 +1684,7 @@ export const syncResources = internalAction({
 			}
 
 			// Upload the config and reload the server
-			await syncGitHubAuth(sandbox, instance.clerkId, resources);
+			await syncGitHubAuth(ctx, sandbox, args.instanceId, instance.clerkId, resources);
 			await uploadBtcaConfig(sandbox, resources, model);
 			const previewAccess = await getPreviewAccessForSandbox(
 				sandbox,

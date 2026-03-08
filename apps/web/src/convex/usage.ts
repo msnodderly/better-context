@@ -4,9 +4,9 @@ import { Result } from 'better-result';
 
 import type { Doc } from './_generated/dataModel.js';
 import { internal } from './_generated/api.js';
-import { action, type ActionCtx } from './_generated/server.js';
+import { action, internalAction, type ActionCtx } from './_generated/server.js';
 import { AnalyticsEvents } from './analyticsEvents.js';
-import { instances } from './apiHelpers.js';
+import { instances, scheduled } from './apiHelpers.js';
 import { requireInstanceOwnershipActionResult, unwrapAuthResult } from './authHelpers.js';
 import { withPrivateApiKey } from './privateWrappers.js';
 import {
@@ -29,25 +29,6 @@ type FeatureMetrics = {
 	included: number;
 };
 
-type LegacyUsageMetrics = {
-	tokensIn: FeatureMetrics;
-	tokensOut: FeatureMetrics;
-	sandboxHours: FeatureMetrics;
-};
-
-type BillingMode = 'ai_budget' | 'legacy';
-
-type ProUsageMetrics =
-	| {
-			mode: 'ai_budget';
-			aiBudget: FeatureMetrics;
-	  }
-	| {
-			mode: 'legacy';
-			aiBudget: FeatureMetrics;
-			legacyMetrics: LegacyUsageMetrics;
-	  };
-
 type UsageCheckResult =
 	| { ok: false; reason: 'subscription_required' | 'free_limit_reached' }
 	| {
@@ -59,8 +40,6 @@ type UsageCheckResult =
 			inputTokens: number;
 			requiredBudgetMicros: number;
 			modelId: string;
-			billingMode: BillingMode;
-			sandboxUsageHours: number;
 			customerId: string;
 	  };
 
@@ -108,12 +87,8 @@ type SubscriptionSnapshot = {
 };
 
 const CHARS_PER_TOKEN = 4;
-const SANDBOX_IDLE_MINUTES = 2;
 const FEATURE_IDS = {
 	aiBudget: 'ai_budget',
-	tokensIn: 'tokens_in',
-	tokensOut: 'tokens_out',
-	sandboxHours: 'sandbox_hours',
 	chatMessages: 'chat_messages'
 } as const;
 
@@ -163,16 +138,6 @@ function estimateTokensFromText(text: string): number {
 	return Math.max(1, Math.ceil(trimmed.length / CHARS_PER_TOKEN));
 }
 
-function estimateSandboxUsageHours(params: { lastActiveAt?: number | null; now: number }): number {
-	const maxWindowMs = SANDBOX_IDLE_MINUTES * 60 * 1000;
-	if (!params.lastActiveAt) {
-		return maxWindowMs / (60 * 60 * 1000);
-	}
-	const deltaMs = Math.max(0, params.now - params.lastActiveAt);
-	const cappedMs = Math.min(deltaMs, maxWindowMs);
-	return cappedMs / (60 * 60 * 1000);
-}
-
 function clampPercent(value: number): number {
 	if (!Number.isFinite(value)) return 0;
 	return Math.min(100, Math.max(0, value));
@@ -201,10 +166,6 @@ const unwrapUsage = <T>(result: UsageResult<T>): T => {
 		err: (error) => throwUsageError(error)
 	});
 };
-
-const isMissingFeatureError = (error: WebError, featureId: string) =>
-	error instanceof WebExternalDependencyError &&
-	error.message.toLowerCase().includes(`feature ${featureId} not found`);
 
 const toUsageMetric = (args: { usage: number; included: number; balance: number }) => {
 	const usedPct = args.included > 0 ? clampPercent((args.usage / args.included) * 100) : 0;
@@ -246,94 +207,14 @@ const toAutumnCustomer = (
 	payment_method: customer.payment_method
 });
 
-async function getLegacyUsageMetrics(customerId: string) {
-	const [tokensInResult, tokensOutResult, sandboxHoursResult] = await Promise.all([
-		checkFeature({
-			customerId,
-			featureId: FEATURE_IDS.tokensIn
-		}),
-		checkFeature({
-			customerId,
-			featureId: FEATURE_IDS.tokensOut
-		}),
-		checkFeature({
-			customerId,
-			featureId: FEATURE_IDS.sandboxHours
-		})
-	]);
-
-	return {
-		tokensIn: unwrapUsage(tokensInResult),
-		tokensOut: unwrapUsage(tokensOutResult),
-		sandboxHours: unwrapUsage(sandboxHoursResult)
-	};
-}
-
-const hasLegacyUsageEntitlement = (legacyMetrics: LegacyUsageMetrics) =>
-	legacyMetrics.tokensIn.included > 0 ||
-	legacyMetrics.tokensOut.included > 0 ||
-	legacyMetrics.sandboxHours.included > 0;
-
-const toLegacyAiBudgetMetric = (legacyMetrics: LegacyUsageMetrics) => ({
-	usage: Math.max(
-		toUsageMetric(legacyMetrics.tokensIn).usedPct,
-		toUsageMetric(legacyMetrics.tokensOut).usedPct,
-		toUsageMetric(legacyMetrics.sandboxHours).usedPct
-	),
-	balance: Math.min(
-		legacyMetrics.tokensIn.balance,
-		legacyMetrics.tokensOut.balance,
-		legacyMetrics.sandboxHours.balance
-	),
-	included: 100
-});
-
 async function resolveProUsageMetrics(args: {
 	customerId: string;
 	requiredBalance?: number;
-}): Promise<UsageResult<ProUsageMetrics>> {
-	const aiBudgetResult = await checkFeature({
+}): Promise<UsageResult<FeatureMetrics>> {
+	return await checkFeature({
 		customerId: args.customerId,
 		featureId: FEATURE_IDS.aiBudget,
 		requiredBalance: args.requiredBalance
-	});
-
-	if (Result.isError(aiBudgetResult)) {
-		if (!isMissingFeatureError(aiBudgetResult.error, FEATURE_IDS.aiBudget)) {
-			return Result.err(aiBudgetResult.error);
-		}
-
-		const legacyMetrics = await getLegacyUsageMetrics(args.customerId);
-		return Result.ok({
-			mode: 'legacy' as const,
-			aiBudget: toLegacyAiBudgetMetric(legacyMetrics),
-			legacyMetrics
-		});
-	}
-
-	if (aiBudgetResult.value.included > 0) {
-		return Result.ok({
-			mode: 'ai_budget' as const,
-			aiBudget: aiBudgetResult.value
-		});
-	}
-
-	try {
-		const legacyMetrics = await getLegacyUsageMetrics(args.customerId);
-		if (hasLegacyUsageEntitlement(legacyMetrics)) {
-			return Result.ok({
-				mode: 'legacy' as const,
-				aiBudget: toLegacyAiBudgetMetric(legacyMetrics),
-				legacyMetrics
-			});
-		}
-	} catch {
-		// No legacy features left to fall back to.
-	}
-
-	return Result.ok({
-		mode: 'ai_budget' as const,
-		aiBudget: aiBudgetResult.value
 	});
 }
 
@@ -504,6 +385,35 @@ async function trackUsage(args: {
 		return Result.ok(undefined);
 	} catch (error) {
 		return toExternalError(error, 'Failed to track Autumn usage', 'Autumn');
+	}
+}
+
+async function resetAiBudgetBalance(args: {
+	customerId: string;
+	remaining: number;
+}): Promise<UsageResult<void>> {
+	const autumnResult = getAutumnClientResult();
+	if (Result.isError(autumnResult)) {
+		return Result.err(autumnResult.error);
+	}
+	const autumn = autumnResult.value;
+	try {
+		const result = await autumn.v2.balances.update({
+			customer_id: args.customerId,
+			feature_id: FEATURE_IDS.aiBudget,
+			remaining: args.remaining
+		});
+		if (result.error) {
+			return Result.err(
+				new WebExternalDependencyError({
+					message: result.error.message ?? 'Failed to reset Autumn AI budget balance',
+					dependency: 'Autumn'
+				})
+			);
+		}
+		return Result.ok(undefined);
+	} catch (error) {
+		return toExternalError(error, 'Failed to reset Autumn AI budget balance', 'Autumn');
 	}
 }
 
@@ -734,8 +644,6 @@ export const ensureUsageAvailable = action({
 			inputTokens: v.number(),
 			requiredBudgetMicros: v.number(),
 			modelId: v.string(),
-			billingMode: v.union(v.literal('ai_budget'), v.literal('legacy')),
-			sandboxUsageHours: v.number(),
 			customerId: v.string()
 		})
 	),
@@ -808,68 +716,23 @@ export const ensureUsageAvailable = action({
 				inputTokens: 0,
 				requiredBudgetMicros: 0,
 				modelId,
-				billingMode: 'ai_budget',
-				sandboxUsageHours: 0,
 				customerId: autumnCustomer.id ?? instance.clerkId
 			};
 		}
 
 		if (isProPlan) {
 			const inputTokens = estimateTokensFromText(args.question);
-			const sandboxUsageHours = args.resources.length
-				? estimateSandboxUsageHours({ lastActiveAt: instance.lastActiveAt, now: Date.now() })
-				: 0;
 			const requiredBudgetMicros = getPreflightAiBudgetMicros({
 				modelId,
 				inputTokens
 			});
-			const proUsage = unwrapUsage(
+			const aiBudget = unwrapUsage(
 				await resolveProUsageMetrics({
 					customerId: autumnCustomer.id ?? instance.clerkId,
 					requiredBalance: requiredBudgetMicros
 				})
 			);
-
-			if (proUsage.mode === 'legacy') {
-				const requiredTokensIn = inputTokens > 0 ? inputTokens : undefined;
-				const requiredTokensOut = 1;
-				const requiredSandboxHours = sandboxUsageHours > 0 ? sandboxUsageHours : undefined;
-				const hasEnough = (balance: number, required?: number) =>
-					required == null ? balance > 0 : balance >= required;
-				const ok =
-					hasEnough(proUsage.legacyMetrics.tokensIn.balance, requiredTokensIn) &&
-					hasEnough(proUsage.legacyMetrics.tokensOut.balance, requiredTokensOut) &&
-					hasEnough(proUsage.legacyMetrics.sandboxHours.balance, requiredSandboxHours);
-
-				if (!ok) {
-					await ctx.scheduler.runAfter(0, internal.analytics.trackEvent, {
-						distinctId: instance.clerkId,
-						event: AnalyticsEvents.USAGE_LIMIT_REACHED,
-						properties: {
-							instanceId: args.instanceId,
-							limitTypes: ['tokensIn', 'tokensOut', 'sandboxHours'],
-							modelId,
-							tokensInBalance: proUsage.legacyMetrics.tokensIn.balance,
-							tokensOutBalance: proUsage.legacyMetrics.tokensOut.balance,
-							sandboxHoursBalance: proUsage.legacyMetrics.sandboxHours.balance
-						}
-					});
-				}
-
-				return {
-					ok,
-					reason: ok ? null : 'limit_reached',
-					metrics: { aiBudget: proUsage.aiBudget },
-					inputTokens,
-					requiredBudgetMicros,
-					modelId,
-					billingMode: 'legacy',
-					sandboxUsageHours,
-					customerId: autumnCustomer.id ?? instance.clerkId
-				};
-			}
-
-			const ok = proUsage.aiBudget.balance >= requiredBudgetMicros;
+			const ok = aiBudget.balance >= requiredBudgetMicros;
 
 			if (!ok) {
 				await ctx.scheduler.runAfter(0, internal.analytics.trackEvent, {
@@ -880,7 +743,7 @@ export const ensureUsageAvailable = action({
 						limitTypes: ['aiBudget'],
 						modelId,
 						requiredBudgetMicros,
-						aiBudgetBalance: proUsage.aiBudget.balance
+						aiBudgetBalance: aiBudget.balance
 					}
 				});
 			}
@@ -889,13 +752,11 @@ export const ensureUsageAvailable = action({
 				ok,
 				reason: ok ? null : 'limit_reached',
 				metrics: {
-					aiBudget: proUsage.aiBudget
+					aiBudget
 				},
 				inputTokens,
 				requiredBudgetMicros,
 				modelId,
-				billingMode: 'ai_budget',
-				sandboxUsageHours,
 				customerId: autumnCustomer.id ?? instance.clerkId
 			};
 		}
@@ -916,9 +777,7 @@ export const finalizeUsage = action({
 		reasoningTokens: v.optional(v.number()),
 		cacheReadTokens: v.optional(v.number()),
 		cacheWriteTokens: v.optional(v.number()),
-		billingMode: v.optional(v.union(v.literal('ai_budget'), v.literal('legacy'))),
-		chargedBudgetMicros: v.optional(v.number()),
-		sandboxUsageHours: v.optional(v.number())
+		chargedBudgetMicros: v.optional(v.number())
 	},
 	returns: v.object({
 		chargedBudgetMicros: v.number(),
@@ -974,75 +833,14 @@ export const finalizeUsage = action({
 			: 0;
 
 		if (isProPlan && chargedBudgetMicros > 0) {
-			if (args.billingMode === 'legacy') {
-				if (args.inputTokens > 0) {
-					tasks.push(
-						trackUsage({
-							customerId: autumnCustomer.id ?? instance.clerkId,
-							featureId: FEATURE_IDS.tokensIn,
-							value: args.inputTokens
-						})
-					);
-				}
-				if (args.outputTokens + (args.reasoningTokens ?? 0) > 0) {
-					tasks.push(
-						trackUsage({
-							customerId: autumnCustomer.id ?? instance.clerkId,
-							featureId: FEATURE_IDS.tokensOut,
-							value: args.outputTokens + (args.reasoningTokens ?? 0)
-						})
-					);
-				}
-				if ((args.sandboxUsageHours ?? 0) > 0) {
-					tasks.push(
-						trackUsage({
-							customerId: autumnCustomer.id ?? instance.clerkId,
-							featureId: FEATURE_IDS.sandboxHours,
-							value: args.sandboxUsageHours ?? 0
-						})
-					);
-				}
-			} else {
-				const trackAiBudgetResult = await trackUsage({
-					customerId: autumnCustomer.id ?? instance.clerkId,
-					featureId: FEATURE_IDS.aiBudget,
-					value: chargedBudgetMicros
-				});
+			const trackAiBudgetResult = await trackUsage({
+				customerId: autumnCustomer.id ?? instance.clerkId,
+				featureId: FEATURE_IDS.aiBudget,
+				value: chargedBudgetMicros
+			});
 
-				if (
-					Result.isError(trackAiBudgetResult) &&
-					isMissingFeatureError(trackAiBudgetResult.error, FEATURE_IDS.aiBudget)
-				) {
-					if (args.inputTokens > 0) {
-						tasks.push(
-							trackUsage({
-								customerId: autumnCustomer.id ?? instance.clerkId,
-								featureId: FEATURE_IDS.tokensIn,
-								value: args.inputTokens
-							})
-						);
-					}
-					if (args.outputTokens + (args.reasoningTokens ?? 0) > 0) {
-						tasks.push(
-							trackUsage({
-								customerId: autumnCustomer.id ?? instance.clerkId,
-								featureId: FEATURE_IDS.tokensOut,
-								value: args.outputTokens + (args.reasoningTokens ?? 0)
-							})
-						);
-					}
-					if ((args.sandboxUsageHours ?? 0) > 0) {
-						tasks.push(
-							trackUsage({
-								customerId: autumnCustomer.id ?? instance.clerkId,
-								featureId: FEATURE_IDS.sandboxHours,
-								value: args.sandboxUsageHours ?? 0
-							})
-						);
-					}
-				} else if (Result.isError(trackAiBudgetResult)) {
-					throwUsageError(trackAiBudgetResult.error);
-				}
+			if (Result.isError(trackAiBudgetResult)) {
+				throwUsageError(trackAiBudgetResult.error);
 			}
 		}
 
@@ -1137,9 +935,9 @@ export const getBillingSummary = action({
 				featureId: FEATURE_IDS.chatMessages
 			})
 		]);
-		const proUsage = unwrapUsage(proUsageResult);
+		const aiBudget = unwrapUsage(proUsageResult);
 		const chatMessages = unwrapUsage(chatMessagesResult);
-		const aiBudgetUsage = toUsageMetric(proUsage.aiBudget);
+		const aiBudgetUsage = toUsageMetric(aiBudget);
 
 		const result: BillingSummaryResult = {
 			plan,
@@ -1165,6 +963,59 @@ export const getBillingSummary = action({
 		}
 
 		return result;
+	}
+});
+
+export const resetProAiBudgetBalances = internalAction({
+	args: {},
+	returns: v.object({
+		checked: v.number(),
+		reset: v.number(),
+		skipped: v.number(),
+		failed: v.number()
+	}),
+	handler: async (ctx) => {
+		const allInstances = await ctx.runQuery(scheduled.queries.listInstances, {});
+		let reset = 0;
+		let skipped = 0;
+		let failed = 0;
+
+		for (const instance of allInstances) {
+			try {
+				const autumnCustomer = unwrapUsage(
+					await getOrCreateCustomer({
+						clerkId: instance.clerkId
+					})
+				);
+				const activeProduct = getActiveProduct(autumnCustomer.products);
+				if (activeProduct?.id !== 'btca_pro') {
+					skipped++;
+					continue;
+				}
+
+				unwrapUsage(
+					await resetAiBudgetBalance({
+						customerId: autumnCustomer.id ?? instance.clerkId,
+						remaining: PRO_AI_BUDGET_MICROS
+					})
+				);
+				reset++;
+			} catch (error) {
+				failed++;
+				console.error('Failed to reset AI budget balance', {
+					instanceId: instance._id,
+					clerkId: instance.clerkId,
+					error
+				});
+			}
+		}
+
+		return {
+			checked: allInstances.length,
+			reset,
+			skipped,
+			failed
+		};
 	}
 });
 

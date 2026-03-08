@@ -40,13 +40,10 @@ const getGitProvider = (url?: string): 'github' | 'generic' => {
 const shouldIncludeResource = (
 	resource: {
 		visibility?: 'public' | 'private';
-		authSource?: 'clerk_github_oauth';
+		authSource?: 'clerk_github_oauth' | 'github_app';
 	},
 	includePrivate: boolean
-) =>
-	includePrivate ||
-	resource.visibility !== 'private' ||
-	resource.authSource !== 'clerk_github_oauth';
+) => includePrivate || resource.visibility !== 'private';
 
 const getStoredResourceType = (resource: { type?: 'git' | 'npm'; package?: string }) =>
 	resource.type === 'npm' || resource.package ? 'npm' : 'git';
@@ -67,7 +64,7 @@ const normalizeUserResource = <
 		specialNotes?: string;
 		gitProvider?: 'github' | 'generic';
 		visibility?: 'public' | 'private';
-		authSource?: 'clerk_github_oauth';
+		authSource?: 'clerk_github_oauth' | 'github_app';
 		createdAt: number;
 	}
 >(
@@ -99,7 +96,7 @@ const toCustomResource = (resource: {
 	specialNotes?: string;
 	gitProvider?: 'github' | 'generic';
 	visibility?: 'public' | 'private';
-	authSource?: 'clerk_github_oauth';
+	authSource?: 'clerk_github_oauth' | 'github_app';
 }): {
 	name: string;
 	displayName: string;
@@ -112,7 +109,7 @@ const toCustomResource = (resource: {
 	specialNotes?: string;
 	gitProvider?: 'github' | 'generic';
 	visibility?: 'public' | 'private';
-	authSource?: 'clerk_github_oauth';
+	authSource?: 'clerk_github_oauth' | 'github_app';
 	isGlobal: false;
 } => {
 	const type = getStoredResourceType(resource);
@@ -161,7 +158,7 @@ const customResourceValidator = v.object({
 	specialNotes: v.optional(v.string()),
 	gitProvider: v.optional(v.union(v.literal('github'), v.literal('generic'))),
 	visibility: v.optional(v.union(v.literal('public'), v.literal('private'))),
-	authSource: v.optional(v.literal('clerk_github_oauth')),
+	authSource: v.optional(v.union(v.literal('clerk_github_oauth'), v.literal('github_app'))),
 	isGlobal: v.literal(false)
 });
 
@@ -180,7 +177,7 @@ const userResourceValidator = v.object({
 	specialNotes: v.optional(v.string()),
 	gitProvider: v.optional(v.union(v.literal('github'), v.literal('generic'))),
 	visibility: v.optional(v.union(v.literal('public'), v.literal('private'))),
-	authSource: v.optional(v.literal('clerk_github_oauth')),
+	authSource: v.optional(v.union(v.literal('clerk_github_oauth'), v.literal('github_app'))),
 	createdAt: v.number()
 });
 
@@ -505,7 +502,7 @@ export const addCustomResourceInternal = internalMutation({
 		specialNotes: v.optional(v.string()),
 		gitProvider: v.optional(v.union(v.literal('github'), v.literal('generic'))),
 		visibility: v.optional(v.union(v.literal('public'), v.literal('private'))),
-		authSource: v.optional(v.literal('clerk_github_oauth'))
+		authSource: v.optional(v.union(v.literal('clerk_github_oauth'), v.literal('github_app')))
 	},
 	returns: v.id('userResources'),
 	handler: async (ctx, args) => {

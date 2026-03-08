@@ -134,7 +134,7 @@ export default defineSchema({
 		specialNotes: v.optional(v.string()),
 		gitProvider: v.optional(v.union(v.literal('github'), v.literal('generic'))),
 		visibility: v.optional(v.union(v.literal('public'), v.literal('private'))),
-		authSource: v.optional(v.literal('clerk_github_oauth')),
+		authSource: v.optional(v.union(v.literal('clerk_github_oauth'), v.literal('github_app'))),
 		createdAt: v.number()
 	})
 		.index('by_instance', ['instanceId'])
@@ -154,6 +154,30 @@ export default defineSchema({
 	})
 		.index('by_instance', ['instanceId'])
 		.index('by_clerk_user_id', ['clerkUserId']),
+
+	githubInstallations: defineTable({
+		instanceId: v.id('instances'),
+		clerkUserId: v.string(),
+		installationId: v.number(),
+		accountLogin: v.string(),
+		accountType: v.union(v.literal('User'), v.literal('Organization')),
+		targetType: v.union(v.literal('User'), v.literal('Organization')),
+		repositorySelection: v.union(v.literal('all'), v.literal('selected')),
+		repositoryIds: v.array(v.number()),
+		repositoryNames: v.array(v.string()),
+		contentsPermission: v.optional(v.string()),
+		metadataPermission: v.optional(v.string()),
+		htmlUrl: v.optional(v.string()),
+		status: v.union(v.literal('active'), v.literal('suspended'), v.literal('deleted')),
+		connectedAt: v.number(),
+		lastSyncedAt: v.number(),
+		suspendedAt: v.optional(v.number())
+	})
+		.index('by_instance', ['instanceId'])
+		.index('by_clerk_user_id', ['clerkUserId'])
+		.index('by_installation_id', ['installationId'])
+		.index('by_instance_and_installation', ['instanceId', 'installationId'])
+		.index('by_instance_and_account_login', ['instanceId', 'accountLogin']),
 
 	threads: defineTable({
 		instanceId: v.id('instances'),

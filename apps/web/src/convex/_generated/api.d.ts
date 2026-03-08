@@ -15,6 +15,7 @@ import type * as authHelpers from "../authHelpers.js";
 import type * as clerkApiKeys from "../clerkApiKeys.js";
 import type * as clerkApiKeysQueries from "../clerkApiKeysQueries.js";
 import type * as crons from "../crons.js";
+import type * as githubApp from "../githubApp.js";
 import type * as githubAuth from "../githubAuth.js";
 import type * as githubConnections from "../githubConnections.js";
 import type * as http from "../http.js";
@@ -54,6 +55,7 @@ declare const fullApi: ApiFromModules<{
   clerkApiKeys: typeof clerkApiKeys;
   clerkApiKeysQueries: typeof clerkApiKeysQueries;
   crons: typeof crons;
+  githubApp: typeof githubApp;
   githubAuth: typeof githubAuth;
   githubConnections: typeof githubConnections;
   http: typeof http;

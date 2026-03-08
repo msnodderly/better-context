@@ -1,5 +1,7 @@
 import { feature, item, plan } from 'atmn';
 
+import { PRO_AI_BUDGET_MICROS } from './src/lib/billing/aiBudget.ts';
+
 // Features
 export const sandbox_hours = feature({
 	id: 'sandbox_hours',
@@ -61,22 +63,8 @@ export const btca_pro = plan({
 	},
 	items: [
 		item({
-			featureId: sandbox_hours.id,
-			included: 6,
-			reset: {
-				interval: 'month'
-			}
-		}),
-		item({
-			featureId: tokens_in.id,
-			included: 1500000,
-			reset: {
-				interval: 'month'
-			}
-		}),
-		item({
-			featureId: tokens_out.id,
-			included: 300000,
+			featureId: ai_budget.id,
+			included: PRO_AI_BUDGET_MICROS,
 			reset: {
 				interval: 'month'
 			}

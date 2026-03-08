@@ -16,7 +16,6 @@
 	let isRedirecting = $state(false);
 	let errorMessage = $state<string | null>(null);
 	const aiUsage = $derived(billingStore.summary?.usage.aiBudget);
-	const usedPct = $derived(aiUsage?.usedPct ?? 0);
 	const remainingPct = $derived(aiUsage?.remainingPct ?? 100);
 
 	const formattedEndDate = $derived.by(() => {
@@ -140,12 +139,12 @@
 							<p class="bc-muted text-xs">Higher-end models use this faster.</p>
 						</div>
 					</div>
-					<span class="text-sm font-medium">{Math.round(usedPct)}% used</span>
+					<span class="text-sm font-medium">{Math.round(remainingPct)}% remaining</span>
 				</div>
 				<div class="sandbox-progress-bar mt-4" style:width="100%">
 					<div
 						class="sandbox-progress-fill"
-						style:width={`${usedPct}%`}
+						style:width={`${remainingPct}%`}
 						style:background-color={remainingPct <= 10
 							? 'hsl(var(--bc-error))'
 							: remainingPct <= 25

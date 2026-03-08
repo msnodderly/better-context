@@ -1,4 +1,5 @@
 import { formatConversationHistory, type BtcaChunk, type ThreadMessage } from '@btca/shared';
+import type { FunctionReference } from 'convex/server';
 import { httpRouter } from 'convex/server';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
@@ -9,6 +10,7 @@ import type { Id } from './_generated/dataModel.js';
 import { httpAction, type ActionCtx } from './_generated/server.js';
 import { AnalyticsEvents } from './analyticsEvents.js';
 import { instances } from './apiHelpers.js';
+import { getAppInfo, getInstallationSnapshot } from './githubApp.js';
 import { withPrivateApiKey } from './privateWrappers.js';
 import {
 	INSTANCE_DISK_FULL_MESSAGE,
@@ -16,7 +18,7 @@ import {
 	getUserFacingInstanceError
 } from '../lib/instanceErrors';
 import { getWebSandboxModel } from '../lib/models/webSandboxModels.ts';
-import { WebUnhandledError, type WebError } from '../lib/result/errors';
+import { WebConfigMissingError, WebUnhandledError, type WebError } from '../lib/result/errors';
 
 type HttpFlowResult<T> = Result<T, WebError>;
 
@@ -24,6 +26,49 @@ const usageActions = api.usage;
 const instanceActions = instances.actions;
 const instanceMutations = instances.mutations;
 const instanceQueries = instances.queries;
+const githubConnectionsInternal = internal as unknown as {
+	githubConnections: {
+		upsertForInstance: FunctionReference<
+			'mutation',
+			'internal',
+			{
+				instanceId: Id<'instances'>;
+				clerkUserId: string;
+				installationId: number;
+				accountLogin: string;
+				accountType: 'User' | 'Organization';
+				targetType: 'User' | 'Organization';
+				repositorySelection: 'all' | 'selected';
+				repositoryIds: number[];
+				repositoryNames: string[];
+				contentsPermission?: string;
+				metadataPermission?: string;
+				htmlUrl?: string;
+				status: 'active' | 'suspended' | 'deleted';
+				connectedAt: number;
+				lastSyncedAt: number;
+				suspendedAt?: number;
+			},
+			Id<'githubInstallations'>
+		>;
+		getByInstallationId: FunctionReference<
+			'query',
+			'internal',
+			{ installationId: number },
+			Array<{
+				instanceId: Id<'instances'>;
+				clerkUserId: string;
+				installationId: number;
+			}>
+		>;
+		markDeletedByInstallationId: FunctionReference<
+			'mutation',
+			'internal',
+			{ installationId: number },
+			null
+		>;
+	};
+};
 
 const http = httpRouter();
 
@@ -46,6 +91,7 @@ const buildAllowedOrigins = (): Set<string> => {
 };
 
 const allowedOrigins = buildAllowedOrigins();
+const githubConnectStateLifetimeMs = 10 * 60 * 1000;
 
 type SvixHeaders = {
 	'svix-id': string;
@@ -279,6 +325,101 @@ function corsTextResponse(request: Request, message: string, status: number): Re
 	return withCors(request, new Response(message, { status }));
 }
 
+const getClientOrigin = (request: Request) => {
+	const origin = request.headers.get('Origin');
+	if (origin && isOriginAllowed(origin)) {
+		return origin;
+	}
+
+	return [...allowedOrigins][0] ?? 'http://localhost:5173';
+};
+
+const getGitHubStateSecret = () => {
+	const secret = process.env.GITHUB_APP_CLIENT_SECRET;
+	if (!secret) {
+		throw new WebConfigMissingError({
+			message: 'GITHUB_APP_CLIENT_SECRET is not set in the Convex environment',
+			config: 'GITHUB_APP_CLIENT_SECRET'
+		});
+	}
+	return secret;
+};
+
+const sanitizeReturnTo = (value: string | null) =>
+	value && value.startsWith('/') && !value.startsWith('//') ? value : '/app/settings/resources';
+
+const toHex = (bytes: Uint8Array) =>
+	[...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
+const toBase64Url = (value: string) =>
+	btoa(String.fromCharCode(...new TextEncoder().encode(value)))
+		.replace(/\+/g, '-')
+		.replace(/\//g, '_')
+		.replace(/=+$/g, '');
+
+const fromBase64Url = (value: string) => {
+	const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+	const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+	const binary = atob(`${normalized}${padding}`);
+	return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+};
+
+const signHmacSha256 = async (secret: string, payload: string) => {
+	const key = await crypto.subtle.importKey(
+		'raw',
+		new TextEncoder().encode(secret),
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign']
+	);
+	const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+	return toHex(new Uint8Array(signature));
+};
+
+const encodeGitHubConnectState = async (payload: {
+	clerkId: string;
+	returnTo: string;
+	issuedAt: number;
+}) => {
+	const body = toBase64Url(JSON.stringify(payload));
+	const signature = await signHmacSha256(getGitHubStateSecret(), body);
+	return `${body}.${signature}`;
+};
+
+const decodeGitHubConnectState = async (state: string) => {
+	const [body, signature] = state.split('.', 2);
+	if (!body || !signature) {
+		return null;
+	}
+
+	const expectedSignature = await signHmacSha256(getGitHubStateSecret(), body);
+	if (signature !== expectedSignature) {
+		return null;
+	}
+
+	try {
+		const parsed = JSON.parse(fromBase64Url(body)) as {
+			clerkId?: string;
+			returnTo?: string;
+			issuedAt?: number;
+		};
+		if (!parsed.clerkId || typeof parsed.issuedAt !== 'number') {
+			return null;
+		}
+		if (Date.now() - parsed.issuedAt > githubConnectStateLifetimeMs) {
+			return null;
+		}
+
+		return {
+			clerkId: parsed.clerkId,
+			returnTo: sanitizeReturnTo(parsed.returnTo ?? null),
+			issuedAt: parsed.issuedAt
+		};
+	} catch {
+		return null;
+	}
+};
+
 const corsPreflight = httpAction(async (_, request) => {
 	const origin = request.headers.get('Origin');
 	const headers = new Headers();
@@ -402,8 +543,6 @@ const chatStream = httpAction(async (ctx, request) => {
 		inputTokens?: number;
 		requiredBudgetMicros?: number;
 		modelId?: string;
-		billingMode?: 'ai_budget' | 'legacy';
-		sandboxUsageHours?: number;
 	};
 
 	const streamStartedAt = Date.now();
@@ -628,12 +767,10 @@ const chatStream = httpAction(async (ctx, request) => {
 						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
 						cacheReadTokens: actualUsage?.cacheReadTokens ?? 0,
 						cacheWriteTokens: actualUsage?.cacheWriteTokens ?? 0,
-						billingMode: usageData.billingMode,
 						chargedBudgetMicros:
 							doneEvent?.metrics?.pricing?.costUsd?.total != null
 								? Math.max(0, Math.round(doneEvent.metrics.pricing.costUsd.total * 1_000_000))
-								: undefined,
-						sandboxUsageHours: usageData.sandboxUsageHours ?? 0
+								: undefined
 					});
 					chargedBudgetMicros = finalizeResult.chargedBudgetMicros ?? 0;
 				} catch (error) {
@@ -791,6 +928,184 @@ const clerkWebhook = httpAction(async (ctx, request) => {
 	return withCors(request, response);
 });
 
+const githubConnectStart = httpAction(async (ctx, request) => {
+	try {
+		const identity = await ctx.auth.getUserIdentity();
+		if (!identity) {
+			return corsTextResponse(request, 'Unauthorized', 401);
+		}
+
+		const url = new URL(request.url);
+		const returnTo = sanitizeReturnTo(url.searchParams.get('returnTo'));
+		const state = await encodeGitHubConnectState({
+			clerkId: identity.subject,
+			returnTo,
+			issuedAt: Date.now()
+		});
+		const appInfo = await getAppInfo();
+		const response = jsonResponse({
+			url: `https://github.com/apps/${appInfo.slug}/installations/new?state=${encodeURIComponent(state)}`
+		});
+		return withCors(request, response);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'Failed to start GitHub connect flow';
+		return withCors(request, jsonResponse({ error: message }, { status: 500 }));
+	}
+});
+
+const githubConnectCallback = httpAction(async (ctx, request) => {
+	const url = new URL(request.url);
+	const state = await decodeGitHubConnectState(url.searchParams.get('state') ?? '');
+	const clientOrigin = getClientOrigin(request);
+	const redirectUrl = new URL(state?.returnTo ?? '/app/settings/resources', clientOrigin);
+
+	if (!state) {
+		redirectUrl.searchParams.set('github', 'error');
+		redirectUrl.searchParams.set('github_error', 'invalid_state');
+		return Response.redirect(redirectUrl.toString(), 302);
+	}
+
+	const installationIdValue = Number(url.searchParams.get('installation_id'));
+	if (!Number.isFinite(installationIdValue) || installationIdValue <= 0) {
+		redirectUrl.searchParams.set('github', 'error');
+		redirectUrl.searchParams.set('github_error', 'missing_installation');
+		return Response.redirect(redirectUrl.toString(), 302);
+	}
+
+	const instance = await ctx.runQuery(instances.internalQueries.getByClerkIdInternal, {
+		clerkId: state.clerkId
+	});
+	if (!instance) {
+		redirectUrl.searchParams.set('github', 'error');
+		redirectUrl.searchParams.set('github_error', 'missing_instance');
+		return Response.redirect(redirectUrl.toString(), 302);
+	}
+
+	const snapshot = await getInstallationSnapshot(installationIdValue);
+	if (!snapshot) {
+		redirectUrl.searchParams.set('github', 'error');
+		redirectUrl.searchParams.set('github_error', 'missing_installation');
+		return Response.redirect(redirectUrl.toString(), 302);
+	}
+
+	await ctx.runMutation(githubConnectionsInternal.githubConnections.upsertForInstance, {
+		instanceId: instance._id,
+		clerkUserId: state.clerkId,
+		installationId: snapshot.installationId,
+		accountLogin: snapshot.accountLogin,
+		accountType: snapshot.accountType,
+		targetType: snapshot.targetType,
+		repositorySelection: snapshot.repositorySelection,
+		repositoryIds: snapshot.repositoryIds,
+		repositoryNames: snapshot.repositoryNames,
+		contentsPermission: snapshot.contentsPermission,
+		metadataPermission: snapshot.metadataPermission,
+		htmlUrl: snapshot.htmlUrl,
+		status: snapshot.status,
+		connectedAt: snapshot.connectedAt,
+		lastSyncedAt: snapshot.lastSyncedAt,
+		suspendedAt: snapshot.suspendedAt
+	});
+
+	redirectUrl.searchParams.set('github', 'connected');
+	const setupAction = url.searchParams.get('setup_action');
+	if (setupAction) {
+		redirectUrl.searchParams.set('setup_action', setupAction);
+	}
+	return Response.redirect(redirectUrl.toString(), 302);
+});
+
+const verifyGitHubWebhookSignature = async (
+	payload: string,
+	signature: string | null,
+	secret: string
+) => {
+	if (!signature?.startsWith('sha256=')) {
+		return false;
+	}
+
+	const expected = await signHmacSha256(secret, payload);
+	return signature === `sha256=${expected}`;
+};
+
+const githubWebhook = httpAction(async (ctx, request) => {
+	const secret = process.env.GITHUB_APP_WEBHOOK_SECRET;
+	if (!secret) {
+		return jsonResponse({ error: 'Missing GitHub webhook secret' }, { status: 500 });
+	}
+
+	const payload = await request.text();
+	const signature = request.headers.get('x-hub-signature-256');
+	const isValid = await verifyGitHubWebhookSignature(payload, signature, secret);
+	if (!isValid) {
+		return jsonResponse({ error: 'Invalid webhook signature' }, { status: 400 });
+	}
+
+	const event = request.headers.get('x-github-event') ?? '';
+	let body: {
+		action?: string;
+		installation?: { id?: number };
+	};
+	try {
+		body = JSON.parse(payload) as {
+			action?: string;
+			installation?: { id?: number };
+		};
+	} catch {
+		return jsonResponse({ error: 'Invalid webhook payload' }, { status: 400 });
+	}
+	const installationId = body.installation?.id;
+
+	if (!installationId || !['installation', 'installation_repositories'].includes(event)) {
+		return jsonResponse({ received: true });
+	}
+
+	if (event === 'installation' && body.action === 'deleted') {
+		await ctx.runMutation(githubConnectionsInternal.githubConnections.markDeletedByInstallationId, {
+			installationId
+		});
+		return jsonResponse({ received: true });
+	}
+
+	const snapshot = await getInstallationSnapshot(installationId);
+	if (!snapshot) {
+		await ctx.runMutation(githubConnectionsInternal.githubConnections.markDeletedByInstallationId, {
+			installationId
+		});
+		return jsonResponse({ received: true });
+	}
+
+	const linkedInstallations = await ctx.runQuery(
+		githubConnectionsInternal.githubConnections.getByInstallationId,
+		{ installationId }
+	);
+
+	await Promise.all(
+		linkedInstallations.map((record) =>
+			ctx.runMutation(githubConnectionsInternal.githubConnections.upsertForInstance, {
+				instanceId: record.instanceId,
+				clerkUserId: record.clerkUserId,
+				installationId: snapshot.installationId,
+				accountLogin: snapshot.accountLogin,
+				accountType: snapshot.accountType,
+				targetType: snapshot.targetType,
+				repositorySelection: snapshot.repositorySelection,
+				repositoryIds: snapshot.repositoryIds,
+				repositoryNames: snapshot.repositoryNames,
+				contentsPermission: snapshot.contentsPermission,
+				metadataPermission: snapshot.metadataPermission,
+				htmlUrl: snapshot.htmlUrl,
+				status: snapshot.status,
+				connectedAt: snapshot.connectedAt,
+				lastSyncedAt: snapshot.lastSyncedAt,
+				suspendedAt: snapshot.suspendedAt
+			})
+		)
+	);
+
+	return jsonResponse({ received: true });
+});
+
 http.route({
 	path: '/chat/stream',
 	method: 'POST',
@@ -813,6 +1128,30 @@ http.route({
 	path: '/webhooks/clerk',
 	method: 'OPTIONS',
 	handler: corsPreflight
+});
+
+http.route({
+	path: '/github/connect/start',
+	method: 'GET',
+	handler: githubConnectStart
+});
+
+http.route({
+	path: '/github/connect/start',
+	method: 'OPTIONS',
+	handler: corsPreflight
+});
+
+http.route({
+	path: '/github/connect/callback',
+	method: 'GET',
+	handler: githubConnectCallback
+});
+
+http.route({
+	path: '/webhooks/github',
+	method: 'POST',
+	handler: githubWebhook
 });
 
 const daytonaWebhook = httpAction(async (ctx, request) => {
@@ -1041,6 +1380,7 @@ async function ensureServerUrlResult(
 			return Result.ok({ serverUrl: instance.serverUrl });
 		}
 
+		let shouldWake = false;
 		if (projectId) {
 			const syncResult = await ctx.runAction(internal.instances.actions.syncResources, {
 				instanceId: instance._id,
@@ -1048,17 +1388,19 @@ async function ensureServerUrlResult(
 				includePrivate: true
 			});
 			if (!syncResult.synced) {
-				return Result.err(
-					new WebUnhandledError({ message: 'Failed to sync the selected project configuration' })
-				);
+				// Convex state can briefly say "running" after Daytona has already stopped the sandbox.
+				// Reuse the wake flow in that case so project chats recover instead of surfacing a false error.
+				shouldWake = true;
 			}
 		}
 
-		const previewAccess = await ctx.runAction(internal.instances.actions.getPreviewAccess, {
-			instanceId: instance._id
-		});
-		sendEvent({ type: 'status', status: 'ready' });
-		return Result.ok(previewAccess);
+		if (!shouldWake) {
+			const previewAccess = await ctx.runAction(internal.instances.actions.getPreviewAccess, {
+				instanceId: instance._id
+			});
+			sendEvent({ type: 'status', status: 'ready' });
+			return Result.ok(previewAccess);
+		}
 	}
 
 	if (!instance.sandboxId) {
