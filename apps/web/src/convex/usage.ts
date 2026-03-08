@@ -13,8 +13,8 @@ import {
 	PRO_AI_BUDGET_MICROS,
 	getPreflightAiBudgetMicros,
 	totalAiBudgetMicros
-} from '../lib/billing/aiBudget.ts';
-import { getWebSandboxModel } from '../lib/models/webSandboxModels.ts';
+} from '../lib/billing/aiBudget';
+import { getWebSandboxModel } from '../lib/models/webSandboxModels';
 import {
 	WebConfigMissingError,
 	WebExternalDependencyError,
@@ -80,7 +80,10 @@ type BillingSummaryResult = {
 	status: 'active' | 'trialing' | 'canceled' | 'none';
 	currentPeriodEnd: number | undefined;
 	canceledAt: number | undefined;
-	customer: { name: null; email: null };
+	customer: {
+		name: string | null;
+		email: string | null;
+	};
 	paymentMethod: unknown;
 	usage: {
 		aiBudget: UsageMetricDisplay;
@@ -177,6 +180,8 @@ function clampPercent(value: number): number {
 
 type AutumnCustomer = {
 	id: string;
+	name?: string | null;
+	email?: string | null;
 	products?: {
 		id?: string;
 		status?: string;
@@ -210,6 +215,36 @@ const toUsageMetric = (args: { usage: number; included: number; balance: number 
 		isDepleted: remainingPct <= 0 || args.balance <= 0
 	};
 };
+
+const customerExpand = ['payment_method'] as const;
+const checkoutSuccessPath = '/app/checkout/success';
+const checkoutCancelPath = '/app/checkout/cancel';
+const billingReturnPath = '/app/settings/billing';
+
+const isAutumnNotFound = (args: { message?: string; statusCode?: number }) =>
+	args.statusCode === 404 || args.message?.toLowerCase().includes('not found') === true;
+
+const toAutumnCustomer = (
+	customer: {
+		id: string | null;
+		name: string | null;
+		email: string | null;
+		products: {
+			id?: string;
+			status?: string;
+			current_period_end?: number | null;
+			canceled_at?: number | null;
+		}[];
+		payment_method?: unknown;
+	},
+	fallbackId: string
+): AutumnCustomer => ({
+	id: customer.id ?? fallbackId,
+	name: customer.name,
+	email: customer.email,
+	products: customer.products ?? [],
+	payment_method: customer.payment_method
+});
 
 async function getLegacyUsageMetrics(customerId: string) {
 	const [tokensInResult, tokensOutResult, sandboxHoursResult] = await Promise.all([
@@ -334,12 +369,21 @@ async function getOrCreateCustomer(user: {
 
 	const autumn = autumnResult.value;
 
-	const fetchCustomer = async (customerId: string): Promise<UsageResult<AutumnCustomer>> => {
+	const fetchCustomer = async (): Promise<UsageResult<AutumnCustomer | null>> => {
 		try {
-			const customerPayload = await autumn.customers.get(customerId, {
-				expand: ['payment_method']
+			const customerPayload = await autumn.customers.get(user.clerkId, {
+				expand: customerExpand
 			});
 			if (customerPayload.error) {
+				if (
+					isAutumnNotFound({
+						message: customerPayload.error.message,
+						statusCode: customerPayload.statusCode
+					})
+				) {
+					return Result.ok(null);
+				}
+
 				return Result.err(
 					new WebExternalDependencyError({
 						message: customerPayload.error.message ?? 'Failed to fetch Autumn customer',
@@ -347,41 +391,44 @@ async function getOrCreateCustomer(user: {
 					})
 				);
 			}
-			const id = customerPayload.data?.id ?? customerId;
-			return Result.ok({
-				id,
-				products: customerPayload.data?.products ?? [],
-				payment_method: customerPayload.data?.payment_method
-			});
+
+			return Result.ok(toAutumnCustomer(customerPayload.data, user.clerkId));
 		} catch (error) {
 			return toExternalError(error, 'Failed to fetch Autumn customer', 'Autumn');
 		}
 	};
 
 	try {
+		const existingCustomerResult = await fetchCustomer();
+		if (Result.isError(existingCustomerResult)) {
+			return Result.err(existingCustomerResult.error);
+		}
+		if (existingCustomerResult.value) {
+			return Result.ok(existingCustomerResult.value);
+		}
+
 		const createPayload = await autumn.customers.create({
 			id: user.clerkId,
 			email: user.email ?? undefined,
-			name: user.name ?? undefined
+			name: user.name ?? undefined,
+			expand: customerExpand
 		});
 
 		if (!createPayload.error) {
-			const customerId = createPayload.data?.id ?? user.clerkId;
-			return await fetchCustomer(customerId);
+			return Result.ok(toAutumnCustomer(createPayload.data, user.clerkId));
 		}
 
-		const message = createPayload.error?.message ?? 'Failed to create Autumn customer';
-		const alreadyExists = message.toLowerCase().includes('already');
-		if (!alreadyExists) {
-			return Result.err(
-				new WebExternalDependencyError({
-					message,
-					dependency: 'Autumn'
-				})
-			);
+		const concurrentFetchResult = await fetchCustomer();
+		if (!Result.isError(concurrentFetchResult) && concurrentFetchResult.value) {
+			return Result.ok(concurrentFetchResult.value);
 		}
 
-		return await fetchCustomer(user.clerkId);
+		return Result.err(
+			new WebExternalDependencyError({
+				message: createPayload.error?.message ?? 'Failed to create Autumn customer',
+				dependency: 'Autumn'
+			})
+		);
 	} catch (error) {
 		return toExternalError(error, 'Failed to create Autumn customer', 'Autumn');
 	}
@@ -464,14 +511,26 @@ async function createCheckoutSessionUrl(args: {
 	autumnClient: Autumn;
 	baseUrl: string;
 	customerId: string;
+	customerData?: {
+		email?: string | null;
+		name?: string | null;
+	};
 }): Promise<UsageResult<string>> {
 	try {
-		const payload = await args.autumnClient.checkout({
+		const payload = await args.autumnClient.attach({
 			customer_id: args.customerId,
 			product_id: 'btca_pro',
-			success_url: `${args.baseUrl}/app/checkout/success`,
+			force_checkout: true,
+			success_url: `${args.baseUrl}${checkoutSuccessPath}`,
+			customer_data:
+				args.customerData?.email || args.customerData?.name
+					? {
+							email: args.customerData.email ?? undefined,
+							name: args.customerData.name ?? undefined
+						}
+					: undefined,
 			checkout_session_params: {
-				cancel_url: `${args.baseUrl}/app/checkout/cancel`
+				cancel_url: `${args.baseUrl}${checkoutCancelPath}`
 			}
 		});
 
@@ -484,36 +543,7 @@ async function createCheckoutSessionUrl(args: {
 			);
 		}
 
-		if (payload.data?.url) {
-			return Result.ok(payload.data.url);
-		}
-
-		const attachPayload = await args.autumnClient.attach({
-			customer_id: args.customerId,
-			product_id: 'btca_pro',
-			success_url: `${args.baseUrl}/app/checkout/success`
-		});
-
-		if (attachPayload.error) {
-			return Result.err(
-				new WebExternalDependencyError({
-					message: attachPayload.error.message ?? 'Failed to attach checkout session',
-					dependency: 'Autumn'
-				})
-			);
-		}
-
-		const checkoutUrl = attachPayload.data?.checkout_url;
-		if (!checkoutUrl) {
-			return Result.err(
-				new WebExternalDependencyError({
-					message: 'Checkout session created but no checkout URL was returned',
-					dependency: 'Autumn'
-				})
-			);
-		}
-
-		return Result.ok(checkoutUrl);
+		return Result.ok(payload.data?.checkout_url ?? `${args.baseUrl}${checkoutSuccessPath}`);
 	} catch (error) {
 		return toExternalError(error, 'Failed to create checkout session', 'Autumn');
 	}
@@ -526,7 +556,7 @@ async function createBillingPortalSessionUrl(args: {
 }): Promise<UsageResult<string>> {
 	try {
 		const payload = await args.autumnClient.customers.billingPortal(args.customerId, {
-			return_url: `${args.baseUrl}/app/settings/billing`
+			return_url: `${args.baseUrl}${billingReturnPath}`
 		});
 
 		if (payload.error) {
@@ -1048,7 +1078,10 @@ export const getBillingSummary = action({
 		),
 		currentPeriodEnd: v.optional(v.number()),
 		canceledAt: v.optional(v.number()),
-		customer: v.object({ name: v.null(), email: v.null() }),
+		customer: v.object({
+			name: v.union(v.string(), v.null()),
+			email: v.union(v.string(), v.null())
+		}),
 		paymentMethod: v.any(),
 		usage: v.object({
 			aiBudget: usageMetricDisplayValidator
@@ -1114,8 +1147,8 @@ export const getBillingSummary = action({
 			currentPeriodEnd: activeProduct?.current_period_end ?? undefined,
 			canceledAt: activeProduct?.canceled_at ?? undefined,
 			customer: {
-				name: null,
-				email: null
+				name: autumnCustomer.name ?? null,
+				email: autumnCustomer.email ?? null
 			},
 			paymentMethod: autumnCustomer.payment_method ?? null,
 			usage: {
@@ -1171,7 +1204,11 @@ export const createCheckoutSession = action({
 			await createCheckoutSessionUrl({
 				autumnClient: unwrapUsage(getAutumnClientResult()),
 				baseUrl: args.baseUrl,
-				customerId: autumnCustomer.id ?? instance.clerkId
+				customerId: autumnCustomer.id ?? instance.clerkId,
+				customerData: {
+					email: autumnCustomer.email,
+					name: autumnCustomer.name
+				}
 			})
 		);
 

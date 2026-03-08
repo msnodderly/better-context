@@ -361,7 +361,7 @@
 			if (found) validResources.push(found.name);
 			else invalidResources.push(res);
 		}
-		if (invalidResources.length > 0) {
+		if (invalidResources.length > 0 && validResources.length === 0) {
 			alert(`Unknown resources: ${invalidResources.join(', ')}`);
 			return;
 		}
