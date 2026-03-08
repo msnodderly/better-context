@@ -626,7 +626,13 @@ const chatStream = httpAction(async (ctx, request) => {
 						inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
 						outputTokens: actualUsage?.outputTokens ?? 0,
 						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
+						cacheReadTokens: actualUsage?.cacheReadTokens ?? 0,
+						cacheWriteTokens: actualUsage?.cacheWriteTokens ?? 0,
 						billingMode: usageData.billingMode,
+						chargedBudgetMicros:
+							doneEvent?.metrics?.pricing?.costUsd?.total != null
+								? Math.max(0, Math.round(doneEvent.metrics.pricing.costUsd.total * 1_000_000))
+								: undefined,
 						sandboxUsageHours: usageData.sandboxUsageHours ?? 0
 					});
 					chargedBudgetMicros = finalizeResult.chargedBudgetMicros ?? 0;

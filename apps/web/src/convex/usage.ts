@@ -884,7 +884,10 @@ export const finalizeUsage = action({
 		inputTokens: v.number(),
 		outputTokens: v.number(),
 		reasoningTokens: v.optional(v.number()),
+		cacheReadTokens: v.optional(v.number()),
+		cacheWriteTokens: v.optional(v.number()),
 		billingMode: v.optional(v.union(v.literal('ai_budget'), v.literal('legacy'))),
+		chargedBudgetMicros: v.optional(v.number()),
 		sandboxUsageHours: v.optional(v.number())
 	},
 	returns: v.object({
@@ -926,12 +929,18 @@ export const finalizeUsage = action({
 		}
 
 		const chargedBudgetMicros = isProPlan
-			? totalAiBudgetMicros({
-					modelId: args.modelId,
-					inputTokens: args.inputTokens,
-					outputTokens: args.outputTokens,
-					reasoningTokens: args.reasoningTokens
-				})
+			? Math.max(
+					0,
+					args.chargedBudgetMicros ??
+						totalAiBudgetMicros({
+							modelId: args.modelId,
+							inputTokens: args.inputTokens,
+							outputTokens: args.outputTokens,
+							reasoningTokens: args.reasoningTokens,
+							cacheReadTokens: args.cacheReadTokens,
+							cacheWriteTokens: args.cacheWriteTokens
+						})
+				)
 			: 0;
 
 		if (isProPlan && chargedBudgetMicros > 0) {
