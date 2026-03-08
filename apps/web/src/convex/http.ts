@@ -19,6 +19,7 @@ import {
 } from '../lib/instanceErrors';
 import { getWebSandboxModel } from '../lib/models/webSandboxModels.ts';
 import { WebConfigMissingError, WebUnhandledError, type WebError } from '../lib/result/errors';
+import { withInstanceRuntimeConfigLock } from './runtimeConfigLock.js';
 
 type HttpFlowResult<T> = Result<T, WebError>;
 
@@ -591,224 +592,231 @@ const chatStream = httpAction(async (ctx, request) => {
 
 				sendEvent({ type: 'session', sessionId } as StreamEventPayload);
 
-				const serverAccessResult = await ensureServerUrlResult(ctx, instance, projectId, sendEvent);
-				if (Result.isError(serverAccessResult)) {
-					throw serverAccessResult.error;
-				}
-				const serverAccess = serverAccessResult.value;
+				await withInstanceRuntimeConfigLock(instance._id.toString(), async () => {
+					const serverAccessResult = await ensureServerUrlResult(
+						ctx,
+						instance,
+						projectId,
+						sendEvent
+					);
+					if (Result.isError(serverAccessResult)) {
+						throw serverAccessResult.error;
+					}
+					const serverAccess = serverAccessResult.value;
 
-				const response = await fetch(`${serverAccess.serverUrl}/question/stream`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						...(serverAccess.previewToken
-							? { 'x-daytona-preview-token': serverAccess.previewToken }
-							: {})
-					},
-					body: JSON.stringify({
-						question: questionWithHistory,
-						resources: updatedResources,
-						quiet: true
-					})
-				});
-
-				if (!response.ok) {
-					const errorText = await response.text();
-					throw new WebUnhandledError({
-						message: errorText || `Server error: ${response.status}`,
-						cause: new Error(errorText || `Server error: ${response.status}`)
+					const response = await fetch(`${serverAccess.serverUrl}/question/stream`, {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+							...(serverAccess.previewToken
+								? { 'x-daytona-preview-token': serverAccess.previewToken }
+								: {})
+						},
+						body: JSON.stringify({
+							question: questionWithHistory,
+							resources: updatedResources,
+							quiet: true
+						})
 					});
-				}
-				if (!response.body) {
-					throw new WebUnhandledError({ message: 'No response body' });
-				}
 
-				let chunksById = new Map<string, BtcaChunk>();
-				let chunkOrder: string[] = [];
-				let outputCharCount = 0;
-				let reasoningCharCount = 0;
-				let doneEvent: BtcaStreamDoneEvent | null = null;
-				const reader = response.body.getReader();
-				const decoder = new TextDecoder();
-				let buffer = '';
+					if (!response.ok) {
+						const errorText = await response.text();
+						throw new WebUnhandledError({
+							message: errorText || `Server error: ${response.status}`,
+							cause: new Error(errorText || `Server error: ${response.status}`)
+						});
+					}
+					if (!response.body) {
+						throw new WebUnhandledError({ message: 'No response body' });
+					}
 
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
+					let chunksById = new Map<string, BtcaChunk>();
+					let chunkOrder: string[] = [];
+					let outputCharCount = 0;
+					let reasoningCharCount = 0;
+					let doneEvent: BtcaStreamDoneEvent | null = null;
+					const reader = response.body.getReader();
+					const decoder = new TextDecoder();
+					let buffer = '';
 
-					buffer += decoder.decode(value, { stream: true });
-					const lines = buffer.split('\n');
-					buffer = lines.pop() ?? '';
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
 
-					let eventData = '';
-					for (const line of lines) {
-						if (line.startsWith('data: ')) {
-							eventData = line.slice(6);
-						} else if (line === '' && eventData) {
-							let event: BtcaStreamEvent;
-							try {
-								event = JSON.parse(eventData) as BtcaStreamEvent;
-							} catch (error) {
-								console.error('Failed to parse event:', error);
+						buffer += decoder.decode(value, { stream: true });
+						const lines = buffer.split('\n');
+						buffer = lines.pop() ?? '';
+
+						let eventData = '';
+						for (const line of lines) {
+							if (line.startsWith('data: ')) {
+								eventData = line.slice(6);
+							} else if (line === '' && eventData) {
+								let event: BtcaStreamEvent;
+								try {
+									event = JSON.parse(eventData) as BtcaStreamEvent;
+								} catch (error) {
+									console.error('Failed to parse event:', error);
+									eventData = '';
+									continue;
+								}
+
+								if (event.type === 'error') {
+									throw new WebUnhandledError({
+										message: event.message ?? 'Stream error',
+										cause: new Error(event.message ?? 'Stream error')
+									});
+								}
+								if (event.type === 'done') {
+									doneEvent = event;
+								} else if (event.type === 'meta') {
+									// ignore meta events from btca server
+								} else {
+									if (event.type === 'text.delta') {
+										outputCharCount += event.delta.length;
+									} else if (event.type === 'reasoning.delta') {
+										reasoningCharCount += event.delta.length;
+									}
+									const update = processStreamEvent(event, chunksById, chunkOrder);
+									if (update) {
+										sendEvent(update);
+									}
+								}
 								eventData = '';
-								continue;
 							}
-
-							if (event.type === 'error') {
-								throw new WebUnhandledError({
-									message: event.message ?? 'Stream error',
-									cause: new Error(event.message ?? 'Stream error')
-								});
-							}
-							if (event.type === 'done') {
-								doneEvent = event;
-							} else if (event.type === 'meta') {
-								// ignore meta events from btca server
-							} else {
-								if (event.type === 'text.delta') {
-									outputCharCount += event.delta.length;
-								} else if (event.type === 'reasoning.delta') {
-									reasoningCharCount += event.delta.length;
-								}
-								const update = processStreamEvent(event, chunksById, chunkOrder);
-								if (update) {
-									sendEvent(update);
-								}
-							}
-							eventData = '';
-						}
-					}
-				}
-
-				reader.releaseLock();
-
-				if (doneEvent) {
-					const chunkOrderFromDone: string[] = [];
-					const chunksByIdFromDone = new Map<string, BtcaChunk>();
-					let textCharCount = 0;
-					let reasoningCharCountFromDone = 0;
-
-					if (doneEvent.reasoning) {
-						const reasoningChunkId = '__reasoning__';
-						chunksByIdFromDone.set(reasoningChunkId, {
-							type: 'reasoning',
-							id: reasoningChunkId,
-							text: doneEvent.reasoning
-						});
-						chunkOrderFromDone.push(reasoningChunkId);
-						reasoningCharCountFromDone = doneEvent.reasoning.length;
-					}
-
-					if (doneEvent.tools.length > 0) {
-						for (const tool of doneEvent.tools) {
-							const toolState =
-								tool.state?.status === 'pending'
-									? 'pending'
-									: tool.state?.status === 'running'
-										? 'running'
-										: 'completed';
-							const toolChunk: BtcaChunk = {
-								type: 'tool',
-								id: tool.callID,
-								toolName: tool.tool,
-								state: toolState
-							};
-							chunksByIdFromDone.set(tool.callID, toolChunk);
-							chunkOrderFromDone.push(tool.callID);
 						}
 					}
 
-					if (doneEvent.text) {
-						const textChunkId = '__text__';
-						chunksByIdFromDone.set(textChunkId, {
-							type: 'text',
-							id: textChunkId,
-							text: doneEvent.text
-						});
-						chunkOrderFromDone.push(textChunkId);
-						textCharCount = doneEvent.text.length;
+					reader.releaseLock();
+
+					if (doneEvent) {
+						const chunkOrderFromDone: string[] = [];
+						const chunksByIdFromDone = new Map<string, BtcaChunk>();
+						let textCharCount = 0;
+						let reasoningCharCountFromDone = 0;
+
+						if (doneEvent.reasoning) {
+							const reasoningChunkId = '__reasoning__';
+							chunksByIdFromDone.set(reasoningChunkId, {
+								type: 'reasoning',
+								id: reasoningChunkId,
+								text: doneEvent.reasoning
+							});
+							chunkOrderFromDone.push(reasoningChunkId);
+							reasoningCharCountFromDone = doneEvent.reasoning.length;
+						}
+
+						if (doneEvent.tools.length > 0) {
+							for (const tool of doneEvent.tools) {
+								const toolState =
+									tool.state?.status === 'pending'
+										? 'pending'
+										: tool.state?.status === 'running'
+											? 'running'
+											: 'completed';
+								const toolChunk: BtcaChunk = {
+									type: 'tool',
+									id: tool.callID,
+									toolName: tool.tool,
+									state: toolState
+								};
+								chunksByIdFromDone.set(tool.callID, toolChunk);
+								chunkOrderFromDone.push(tool.callID);
+							}
+						}
+
+						if (doneEvent.text) {
+							const textChunkId = '__text__';
+							chunksByIdFromDone.set(textChunkId, {
+								type: 'text',
+								id: textChunkId,
+								text: doneEvent.text
+							});
+							chunkOrderFromDone.push(textChunkId);
+							textCharCount = doneEvent.text.length;
+						}
+
+						chunksById = chunksByIdFromDone;
+						chunkOrder = chunkOrderFromDone;
+						outputCharCount = textCharCount;
+						reasoningCharCount = reasoningCharCountFromDone;
 					}
 
-					chunksById = chunksByIdFromDone;
-					chunkOrder = chunkOrderFromDone;
-					outputCharCount = textCharCount;
-					reasoningCharCount = reasoningCharCountFromDone;
-				}
+					const assistantContent = {
+						type: 'chunks' as const,
+						chunks: chunkOrder
+							.map((id) => chunksById.get(id))
+							.filter((chunk): chunk is BtcaChunk => chunk !== undefined)
+					};
 
-				const assistantContent = {
-					type: 'chunks' as const,
-					chunks: chunkOrder
-						.map((id) => chunksById.get(id))
-						.filter((chunk): chunk is BtcaChunk => chunk !== undefined)
-				};
-
-				if (!assistantMessageId) {
-					throw new WebUnhandledError({ message: 'Missing assistant message' });
-				}
-				await ctx.runMutation(api.messages.updateAssistantMessage, {
-					messageId: assistantMessageId,
-					content: assistantContent,
-					stats: toMessageStats(doneEvent)
-				});
-				await ctx.runMutation(
-					instanceMutations.touchActivity,
-					withPrivateApiKey({ instanceId: instance._id })
-				);
-
-				const actualUsage = doneEvent?.usage;
-
-				let chargedBudgetMicros = 0;
-				try {
-					const finalizeResult = await ctx.runAction(usageActions.finalizeUsage, {
-						instanceId: instance._id,
-						modelId: usageData.modelId ?? modelId,
-						inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
-						outputTokens: actualUsage?.outputTokens ?? 0,
-						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
-						cacheReadTokens: actualUsage?.cacheReadTokens ?? 0,
-						cacheWriteTokens: actualUsage?.cacheWriteTokens ?? 0,
-						chargedBudgetMicros:
-							doneEvent?.metrics?.pricing?.costUsd?.total != null
-								? Math.max(0, Math.round(doneEvent.metrics.pricing.costUsd.total * 1_000_000))
-								: undefined
+					if (!assistantMessageId) {
+						throw new WebUnhandledError({ message: 'Missing assistant message' });
+					}
+					await ctx.runMutation(api.messages.updateAssistantMessage, {
+						messageId: assistantMessageId,
+						content: assistantContent,
+						stats: toMessageStats(doneEvent)
 					});
-					chargedBudgetMicros = finalizeResult.chargedBudgetMicros ?? 0;
-				} catch (error) {
-					console.error('Failed to track usage:', error);
-				}
+					await ctx.runMutation(
+						instanceMutations.touchActivity,
+						withPrivateApiKey({ instanceId: instance._id })
+					);
 
-				await ctx.runMutation(
-					instanceMutations.scheduleSyncSandboxStatus,
-					withPrivateApiKey({ instanceId: instance._id })
-				);
+					const actualUsage = doneEvent?.usage;
 
-				await ctx.runMutation(api.streamSessions.complete, withPrivateApiKey({ sessionId }));
-
-				const streamDurationMs = Date.now() - streamStartedAt;
-				const toolsUsed = chunkOrder
-					.map((id) => chunksById.get(id))
-					.filter((c): c is BtcaChunk => c?.type === 'tool')
-					.map((c) => (c as { toolName: string }).toolName);
-
-				await ctx.scheduler.runAfter(0, internal.analytics.trackEvent, {
-					distinctId: identity.subject,
-					event: AnalyticsEvents.STREAM_COMPLETED,
-					properties: {
-						instanceId: instance._id,
-						threadId: resolvedThreadId,
-						durationMs: streamDurationMs,
-						outputChars: outputCharCount,
-						reasoningChars: reasoningCharCount,
-						toolsUsed,
-						toolCount: toolsUsed.length,
-						resourcesUsed: updatedResources,
-						resourceCount: updatedResources.length,
-						modelId: usageData.modelId ?? modelId,
-						inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
-						outputTokens: actualUsage?.outputTokens ?? 0,
-						reasoningTokens: actualUsage?.reasoningTokens ?? 0,
-						chargedBudgetMicros
+					let chargedBudgetMicros = 0;
+					try {
+						const finalizeResult = await ctx.runAction(usageActions.finalizeUsage, {
+							instanceId: instance._id,
+							modelId: usageData.modelId ?? modelId,
+							inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
+							outputTokens: actualUsage?.outputTokens ?? 0,
+							reasoningTokens: actualUsage?.reasoningTokens ?? 0,
+							cacheReadTokens: actualUsage?.cacheReadTokens ?? 0,
+							cacheWriteTokens: actualUsage?.cacheWriteTokens ?? 0,
+							chargedBudgetMicros:
+								doneEvent?.metrics?.pricing?.costUsd?.total != null
+									? Math.max(0, Math.round(doneEvent.metrics.pricing.costUsd.total * 1_000_000))
+									: undefined
+						});
+						chargedBudgetMicros = finalizeResult.chargedBudgetMicros ?? 0;
+					} catch (error) {
+						console.error('Failed to track usage:', error);
 					}
+
+					await ctx.runMutation(
+						instanceMutations.scheduleSyncSandboxStatus,
+						withPrivateApiKey({ instanceId: instance._id })
+					);
+
+					await ctx.runMutation(api.streamSessions.complete, withPrivateApiKey({ sessionId }));
+
+					const streamDurationMs = Date.now() - streamStartedAt;
+					const toolsUsed = chunkOrder
+						.map((id) => chunksById.get(id))
+						.filter((c): c is BtcaChunk => c?.type === 'tool')
+						.map((c) => (c as { toolName: string }).toolName);
+
+					await ctx.scheduler.runAfter(0, internal.analytics.trackEvent, {
+						distinctId: identity.subject,
+						event: AnalyticsEvents.STREAM_COMPLETED,
+						properties: {
+							instanceId: instance._id,
+							threadId: resolvedThreadId,
+							durationMs: streamDurationMs,
+							outputChars: outputCharCount,
+							reasoningChars: reasoningCharCount,
+							toolsUsed,
+							toolCount: toolsUsed.length,
+							resourcesUsed: updatedResources,
+							resourceCount: updatedResources.length,
+							modelId: usageData.modelId ?? modelId,
+							inputTokens: actualUsage?.inputTokens ?? usageData.inputTokens ?? 0,
+							outputTokens: actualUsage?.outputTokens ?? 0,
+							reasoningTokens: actualUsage?.reasoningTokens ?? 0,
+							chargedBudgetMicros
+						}
+					});
 				});
 
 				sendEvent({ type: 'done' });

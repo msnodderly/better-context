@@ -32,6 +32,7 @@ import type * as privateWrappers from "../privateWrappers.js";
 import type * as projects from "../projects.js";
 import type * as resourceActions from "../resourceActions.js";
 import type * as resources from "../resources.js";
+import type * as runtimeConfigLock from "../runtimeConfigLock.js";
 import type * as scheduled_queries from "../scheduled/queries.js";
 import type * as scheduled_updates from "../scheduled/updates.js";
 import type * as scheduled_versionCheck from "../scheduled/versionCheck.js";
@@ -72,6 +73,7 @@ declare const fullApi: ApiFromModules<{
   projects: typeof projects;
   resourceActions: typeof resourceActions;
   resources: typeof resources;
+  runtimeConfigLock: typeof runtimeConfigLock;
   "scheduled/queries": typeof scheduled_queries;
   "scheduled/updates": typeof scheduled_updates;
   "scheduled/versionCheck": typeof scheduled_versionCheck;

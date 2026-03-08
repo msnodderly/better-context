@@ -12,6 +12,14 @@ const throwMcpInternalError = (error: WebError): never => {
 	throw error;
 };
 
+const getGitProvider = (url: string): 'github' | 'generic' => {
+	try {
+		return new URL(url).hostname.toLowerCase() === 'github.com' ? 'github' : 'generic';
+	} catch {
+		return 'generic';
+	}
+};
+
 /**
  * Internal mutation to create a project (used by MCP to avoid auth requirements)
  */
@@ -81,18 +89,15 @@ export const addResourceInternal = internalMutation({
 	},
 	returns: v.id('userResources'),
 	handler: async (ctx, args): Promise<Id<'userResources'>> => {
-		// Check if resource with this name already exists for this project using compound index
 		const existing = await ctx.db
 			.query('userResources')
-			.withIndex('by_project_and_name', (q) =>
-				q.eq('projectId', args.projectId).eq('name', args.name)
-			)
-			.first();
+			.withIndex('by_instance', (q) => q.eq('instanceId', args.instanceId))
+			.collect();
 
-		if (existing) {
+		if (existing.some((resource) => resource.name.toLowerCase() === args.name.toLowerCase())) {
 			const result: McpInternalResult<Id<'userResources'>> = Result.err(
 				new WebConflictError({
-					message: `Resource "${args.name}" already exists in this project`,
+					message: `Resource "${args.name}" already exists in this instance`,
 					conflict: args.name
 				})
 			);
@@ -108,7 +113,7 @@ export const addResourceInternal = internalMutation({
 			branch: args.branch,
 			searchPath: args.searchPath,
 			specialNotes: args.specialNotes,
-			gitProvider: 'github',
+			gitProvider: getGitProvider(args.url),
 			visibility: 'public',
 			createdAt: Date.now()
 		});
@@ -152,7 +157,7 @@ export const updateResourceInternal = internalMutation({
 			branch: args.branch,
 			searchPath: args.searchPath,
 			specialNotes: args.specialNotes,
-			gitProvider: 'github',
+			gitProvider: getGitProvider(args.url),
 			visibility: 'public',
 			authSource: undefined
 		});

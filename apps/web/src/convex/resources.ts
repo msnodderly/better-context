@@ -276,7 +276,10 @@ export const listAvailable = query({
 });
 
 /**
- * Check if a resource name exists within a specific project (case-insensitive)
+ * Check if a resource name already exists anywhere on the instance (case-insensitive).
+ *
+ * Resource cache directories are keyed by resource name inside btca, so allowing the same name
+ * across projects can cause one project's repo checkout to be reused for another project.
  */
 export const resourceExistsInProject = internalQuery({
 	args: {
@@ -285,12 +288,19 @@ export const resourceExistsInProject = internalQuery({
 	},
 	returns: v.boolean(),
 	handler: async (ctx, args) => {
-		const projectResources = await ctx.db
+		const project = await ctx.db.get(args.projectId);
+		if (!project) {
+			return false;
+		}
+
+		const instanceResources = await ctx.db
 			.query('userResources')
-			.withIndex('by_project', (q) => q.eq('projectId', args.projectId))
+			.withIndex('by_instance', (q) => q.eq('instanceId', project.instanceId))
 			.collect();
 
-		return projectResources.some((r) => r.name.toLowerCase() === args.name.toLowerCase());
+		return instanceResources.some(
+			(resource) => resource.name.toLowerCase() === args.name.toLowerCase()
+		);
 	}
 });
 

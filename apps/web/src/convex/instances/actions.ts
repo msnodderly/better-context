@@ -28,6 +28,7 @@ import {
 	WebValidationError,
 	type WebError
 } from '../../lib/result/errors';
+import { withInstanceRuntimeConfigLock } from '../runtimeConfigLock.js';
 
 const instanceQueries = instances.queries;
 const instanceMutations = instances.mutations;
@@ -1401,7 +1402,7 @@ async function maybeScheduleSnapshotMigration(
 	}
 
 	if (instance.state === 'unprovisioned' || instance.state === 'provisioning') {
-		return true;
+		return false;
 	}
 
 	await ctx.runMutation(
@@ -1467,13 +1468,14 @@ export const applyProjectRuntimeConfig = action({
 			};
 		}
 
-		const result: { synced: boolean } = await ctx.runAction(
-			internal.instances.actions.syncResources,
-			{
-				instanceId: instance._id,
-				projectId: args.projectId,
-				includePrivate: true
-			}
+		const result = await withInstanceRuntimeConfigLock(
+			instance._id.toString(),
+			async () =>
+				(await ctx.runAction(internal.instances.actions.syncResources, {
+					instanceId: instance._id,
+					projectId: args.projectId,
+					includePrivate: true
+				})) as { synced: boolean }
 		);
 
 		return {
@@ -1508,8 +1510,30 @@ export const ensureInstanceExists = action({
 		const existing = await ctx.runQuery(instanceQueries.getByClerkId, {});
 
 		if (existing) {
+			let provisionScheduled = false;
+			if (existing.state === 'unprovisioned') {
+				await ctx.runMutation(
+					instanceMutations.updateState,
+					withPrivateApiKey({ instanceId: existing._id, state: 'provisioning' })
+				);
+				await ctx.runMutation(
+					instanceMutations.setServerUrl,
+					withPrivateApiKey({ instanceId: existing._id, serverUrl: '' })
+				);
+				await ctx.runMutation(
+					instanceMutations.clearError,
+					withPrivateApiKey({ instanceId: existing._id })
+				);
+				await ctx.scheduler.runAfter(
+					0,
+					instances.actions.provision,
+					withPrivateApiKey({ instanceId: existing._id })
+				);
+				provisionScheduled = true;
+			}
 			const migrationScheduled = await maybeScheduleSnapshotMigration(ctx, existing);
 			const isProvisioning =
+				provisionScheduled ||
 				migrationScheduled ||
 				existing.state === 'unprovisioned' ||
 				existing.state === 'provisioning';
@@ -1547,8 +1571,30 @@ export const ensureInstanceExistsPrivate = privateAction({
 		});
 
 		if (existing) {
+			let provisionScheduled = false;
+			if (existing.state === 'unprovisioned') {
+				await ctx.runMutation(
+					instanceMutations.updateState,
+					withPrivateApiKey({ instanceId: existing._id, state: 'provisioning' })
+				);
+				await ctx.runMutation(
+					instanceMutations.setServerUrl,
+					withPrivateApiKey({ instanceId: existing._id, serverUrl: '' })
+				);
+				await ctx.runMutation(
+					instanceMutations.clearError,
+					withPrivateApiKey({ instanceId: existing._id })
+				);
+				await ctx.scheduler.runAfter(
+					0,
+					instances.actions.provision,
+					withPrivateApiKey({ instanceId: existing._id })
+				);
+				provisionScheduled = true;
+			}
 			const migrationScheduled = await maybeScheduleSnapshotMigration(ctx, existing);
 			const isProvisioning =
+				provisionScheduled ||
 				migrationScheduled ||
 				existing.state === 'unprovisioned' ||
 				existing.state === 'provisioning';
